@@ -69,6 +69,8 @@ class PiAgentBridge:
             "base_url": base_url,
             "model": model,
             "section_meta": section_meta,
+            "subagent_role": section_meta.get("subagent_role", "OverviewSpecialist"),
+            "subagent_title": section_meta.get("subagent_title", "办学定位与综合概况专家"),
             "retrieved_data": retrieved_data,
             "cell_mappings": cell_mappings,
             "revision_feedback": revision_feedback

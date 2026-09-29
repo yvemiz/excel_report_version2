@@ -70,6 +70,7 @@ venv.bak/
 backend/data/*.db*
 backend/data/*.duckdb*
 backend/data/*.wal
+backend/data/*.jsonl
 
 # 动态上传的文件（保留 .gitkeep）
 backend/data/uploads/*
@@ -82,6 +83,7 @@ backend/data/exports/*
 # 运行过程中的断点暂存文件
 backend/data/checkpoints/*
 !backend/data/checkpoints/.gitkeep
+backend/data/test_scratch/
 
 # 动态生成的统计图表图片（保留 .gitkeep）
 backend/static/charts/*

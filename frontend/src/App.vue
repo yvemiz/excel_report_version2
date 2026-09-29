@@ -47,9 +47,17 @@
           ⚙️ 模型设置 (DeepSeek)
         </button>
 
-        <button class="btn-primary" @click="startPipeline" :disabled="isPipelineRunning || totalCellsInLake === 0">
+        <button class="btn-secondary" @click="fetchBalance" :title="'DeepSeek 账户余额与 Token 消耗监测'">
+          🪙 {{ balanceInfo.balance_cny !== '--' ? `余额: ¥${balanceInfo.balance_cny}` : (telemetrySummary.total_tokens_consumed > 0 ? `已耗 Token: ${telemetrySummary.total_tokens_consumed}` : 'Token/余额') }}
+        </button>
+
+        <button class="btn-primary" @click="() => startPipeline(false)" :disabled="isPipelineRunning || totalCellsInLake === 0">
           <span v-if="isPipelineRunning">⏳ 流水线执行中...</span>
           <span v-else>🚀 启动全流程生成流水线</span>
+        </button>
+
+        <button class="btn-secondary" @click="() => startPipeline(true)" :disabled="isPipelineRunning || totalCellsInLake === 0" title="从历史检查点快速恢复，跳过已完成章节">
+          ⚡ 断点续生 / 恢复
         </button>
       </div>
     </header>
@@ -160,6 +168,9 @@
             >
               <div class="todo-card-header">
                 <span class="todo-title">{{ sec.chapter_title }} {{ sec.section_title }}</span>
+                <span v-if="sec.subagent_title" class="badge badge-purple" style="font-size: 11px; margin-left: 4px;">
+                  🤖 {{ sec.subagent_title }}
+                </span>
                 <span class="badge" :class="getSectionBadgeClass(sec.status)">
                   {{ getSectionStatusText(sec.status) }}
                 </span>
@@ -485,7 +496,7 @@ const renderedReportHtml = computed(() => {
 
   // 2. 将 [数值][^cell_xxx] 替换为带 data-cell-id 的 HTML span
   const processedMd = fullMd.replace(
-    /\[([^\]]+)\]\[\^(cell_[a-f0-9]+)\]/g,
+    /\[([^\]]+)\]\[\^(cell_[a-zA-Z0-9_]+)\]/g,
     '<span class="lake-citation" data-cell-id="$2">$1</span>'
   )
 
@@ -500,6 +511,23 @@ function addLog(msg: string) {
   const time = new Date().toTimeString().split(' ')[0]
   executionLogs.value.push({ time, msg })
   if (executionLogs.value.length > 50) executionLogs.value.shift()
+}
+
+// 全链路可观测性与 DeepSeek 余额状态
+const balanceInfo = ref({ balance_cny: '--', status: '', currency: 'CNY' })
+const telemetrySummary = ref({ total_sections_traced: 0, total_tokens_consumed: 0, total_cost_cny: 0 })
+
+async function fetchBalance() {
+  try {
+    const res = await fetch('/api/pipeline/balance')
+    const data = await res.json()
+    balanceInfo.value = data
+    if (data.token_burn_summary) {
+      telemetrySummary.value = data.token_burn_summary
+    }
+  } catch (e) {
+    console.error('Fetch balance error:', e)
+  }
 }
 
 // 加载健康状态与表格列表
@@ -575,7 +603,12 @@ async function handleScanDirectory() {
     })
     const data = await res.json()
     if (data.success) {
-      addLog(`[✓] 本地目录扫描完成：已录入 ${data.scanned_files_count} 份报表，${data.total_cells_lake} 个单元格物理入湖！`)
+      const filesCount = data.scanned_files_count || data.sheets_count || 0
+      const cellsCount = data.total_cells_lake || data.total_cells || 0
+      addLog(`[✓] 本地目录扫描完成：已录入 ${filesCount} 份报表，${cellsCount} 个单元格物理入湖！`)
+      if (data.workbook_inspection) {
+        addLog(`🛡️ [完整性预检] ${data.workbook_inspection.summary}`)
+      }
       await fetchTables()
       showFolderModal.value = false
     } else {
@@ -611,25 +644,29 @@ async function saveLlmConfig() {
   }
 }
 
-// 启动流水线
-async function startPipeline() {
+// 启动流水线 (支持 resume 断点续生)
+async function startPipeline(resume: boolean = false) {
   if (isPipelineRunning.value) return
   isPipelineRunning.value = true
   currentStage.value = 1
   stage1JevAudit.value = null
-  addLog(`流水线启动：针对【${schoolName.value || '高校'}】执行确定性五阶段学术研报生成...`)
+  const runDesc = resume ? '断点续存恢复运行' : '全新启动全流程'
+  addLog(`流水线启动（${runDesc}）：针对【${schoolName.value || '高校'}】执行确定性五阶段学术研报生成...`)
 
-  // 重置章节内容
-  sections.value.forEach(s => {
-    s.content = ''
-    s.status = 'pending'
-    s.audit = null
-  })
+  // 若非恢复运行，重置章节内容
+  if (!resume) {
+    sections.value.forEach(s => {
+      s.content = ''
+      s.status = 'pending'
+      s.audit = null
+    })
+  }
 
-  // 使用标准 SSE 流式接收事件，带上当前校名参数
-  const sseUrl = schoolName.value 
-    ? `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value)}`
-    : '/api/pipeline/stream'
+  // 使用标准 SSE 流式接收事件，带上当前校名与 resume 参数
+  const params = new URLSearchParams()
+  if (schoolName.value) params.set('school_name', schoolName.value)
+  if (resume) params.set('resume', 'true')
+  const sseUrl = `/api/pipeline/stream?${params.toString()}`
   const es = new EventSource(sseUrl)
 
   es.onmessage = (event) => {
@@ -672,6 +709,13 @@ async function startPipeline() {
         currentRunningText.value = data.text || ''
         const sec = sections.value.find(s => s.id === data.section_id)
         if (sec) {
+          if (data.subagent_title) {
+            sec.subagent_title = data.subagent_title
+            sec.subagent_role = data.subagent_role
+          }
+          if (data.stage === 'subagent_assigned') {
+            addLog(`🤖 ${sec.section_title} -> 分派专家: 【${data.subagent_title}】`)
+          }
           if (data.stage === 'retrieving') sec.status = 'retrieving'
           else if (data.stage === 'retrieved') sec.status = 'retrieved'
           else if (data.stage === 'writing') sec.status = 'writing'
@@ -693,6 +737,10 @@ async function startPipeline() {
               renderMermaidDiagrams()
             })
           }
+        }
+      } else if (data.type === 'telemetry_update') {
+        if (data.summary) {
+          telemetrySummary.value = data.summary
         }
       } else if (data.type === 'section_chunk') {
         const sec = sections.value.find(s => s.id === data.section_id)
@@ -816,6 +864,7 @@ function getSectionStatusText(status: string) {
 
 onMounted(() => {
   fetchTables()
+  fetchBalance()
 })
 </script>
 

@@ -74,10 +74,12 @@ class DuckDBEngine:
         return table_name
 
     def query(self, sql: str) -> List[Dict[str, Any]]:
-        """执行通用 SQL 查询并返回字典列表"""
+        """执行通用 SQL 查询并返回字典列表（采用独立 cursor 保证并发安全）"""
         try:
-            rel = self.conn.execute(sql)
+            cur = self.conn.cursor()
+            rel = cur.execute(sql)
             df = rel.df()
+            cur.close()
             return df.to_dict(orient="records")
         except Exception as e:
             return [{"error": str(e), "sql": sql}]

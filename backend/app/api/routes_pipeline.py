@@ -46,13 +46,21 @@ async def get_pipeline_status():
     }
 
 @router.get("/stream")
-async def pipeline_sse(school_name: Optional[str] = None):
-    """SSE 流式事件接口（完美兼容各种浏览器与代理环境）"""
+async def pipeline_sse(school_name: Optional[str] = None, resume: bool = False):
+    """SSE 流式事件接口（完美兼容各种浏览器与代理环境，支持断点续存恢复）"""
     async def event_generator():
-        async for event in pipeline_instance.execute_pipeline(school_name=school_name):
+        async for event in pipeline_instance.execute_pipeline(school_name=school_name, resume=resume):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.01)
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 @router.websocket("/ws")
 async def pipeline_websocket(websocket: WebSocket):
@@ -82,3 +90,16 @@ async def pipeline_websocket(websocket: WebSocket):
             await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
         except Exception:
             pass
+
+@router.get("/balance")
+async def get_deepseek_balance():
+    """实时查询 DeepSeek API 余额与 Token 消耗统计 (Inspired by pi-deepseek-balance)"""
+    from app.core.telemetry_service import DeepSeekBalanceMonitor
+    api_key = pipeline_instance.agent_runner.api_key if pipeline_instance and hasattr(pipeline_instance, "agent_runner") else ""
+    return await DeepSeekBalanceMonitor.fetch_balance(api_key)
+
+@router.get("/telemetry")
+async def get_pipeline_telemetry():
+    """获取全链路可观测性时延、Token与Jev质检得分汇总"""
+    from app.core.telemetry_service import TelemetryService
+    return TelemetryService.get_summary()

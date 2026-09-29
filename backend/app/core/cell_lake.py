@@ -81,6 +81,24 @@ class CellLake:
                 return dict(row)
         return None
 
+    def get_cells_batch(self, cell_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """批量根据 cell_id 列表查询单元格明细，避免 N+1 连接开销"""
+        if not cell_ids:
+            return {}
+        result = {}
+        unique_ids = list(dict.fromkeys(cell_ids))
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            chunk_size = 800
+            for i in range(0, len(unique_ids), chunk_size):
+                chunk = unique_ids[i:i + chunk_size]
+                placeholders = ",".join(["?"] * len(chunk))
+                cursor.execute(f"SELECT * FROM cell_lake WHERE cell_id IN ({placeholders})", chunk)
+                for row in cursor.fetchall():
+                    d = dict(row)
+                    result[d["cell_id"]] = d
+        return result
+
     def search_cells_by_keyword(self, keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
         """按指标名称或数值进行模糊检索"""
         with self._get_conn() as conn:

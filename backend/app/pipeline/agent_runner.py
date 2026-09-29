@@ -45,6 +45,14 @@ class PiAgentRunner:
         section_title = section_meta.get("section_title", "")
         objective = section_meta.get("objective", "")
 
+        from app.pipeline.domain_subagents import SubagentRouter
+        from app.pipeline.prompt_enhancer import JevPromptEnhancer, StructuredOutputEnforcer
+
+        # 智能匹配专属 Domain Subagent (Inspired by pi-subagents)
+        subagent = SubagentRouter.route(section_meta)
+        section_meta["subagent_role"] = subagent.role_name
+        section_meta["subagent_title"] = subagent.title
+
         # 1. 尝试触发 chart-tool (如果有图表规划，且未曾生成过)
         chart_markdown = ""
         chart_plan = section_meta.get("chart_plan")
@@ -88,22 +96,33 @@ class PiAgentRunner:
                     elif item["type"] == "done":
                         pi_full_content = item["full_content"]
                         full_res = f"{chart_markdown}{pi_full_content}" if chart_markdown else pi_full_content
-                        yield {"type": "done", "full_content": full_res}
+                        # 结构化输出强校验与自愈
+                        repaired = StructuredOutputEnforcer.validate_and_repair(
+                            full_res, section_title, [c.get("cell_id", "") for c in cell_mappings]
+                        )
+                        yield {"type": "done", "full_content": repaired["repaired_text"]}
                         return
 
                 if pi_full_content:
                     full_res = f"{chart_markdown}{pi_full_content}" if chart_markdown else pi_full_content
-                    yield {"type": "done", "full_content": full_res}
+                    repaired = StructuredOutputEnforcer.validate_and_repair(
+                        full_res, section_title, [c.get("cell_id", "") for c in cell_mappings]
+                    )
+                    yield {"type": "done", "full_content": repaired["repaired_text"]}
                     return
 
             except Exception as e:
                 print(f"[Pi-Agent Bridge Warning]: {e}, 自动平滑切换至 Python 原生引擎")
 
-        # 2. 判断是否可以使用 DeepSeek API
+        # 3. 判断是否可以使用 DeepSeek API
         has_valid_key = bool(self.api_key and not self.api_key.startswith("your_"))
         
         if has_valid_key:
-            prompt = self._build_prompt(chapter_title, section_title, objective, retrieved_data, cell_mappings, revision_feedback)
+            raw_prompt = self._build_prompt(chapter_title, section_title, objective, retrieved_data, cell_mappings, revision_feedback)
+            # Jev Prompt 决策模型增强 (Inspired by @hikae/pi-prompt-enhancer)
+            enhanced = JevPromptEnhancer.enhance(raw_prompt, subagent.system_instruction)
+            prompt = enhanced["enhanced_prompt"]
+
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
@@ -113,7 +132,7 @@ class PiAgentRunner:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "你是一名严谨的高等教育数据分析专家与战略研报主笔。你必须严格依据给定的数据事实撰写，绝不编造，且所有数字必须严格标注 [数值][^cell_id] 溯源标记。"
+                        "content": f"你是一名严谨的高等教育数据分析专家，当前担任【{subagent.title}】（{subagent.role_name}）。你必须严格依据给定的数据事实撰写，绝不编造，且所有数字必须严格标注 [数值][^cell_id] 溯源标记。"
                     },
                     {"role": "user", "content": prompt}
                 ],
@@ -143,7 +162,10 @@ class PiAgentRunner:
                                             yield {"type": "chunk", "text": delta}
                                     except Exception:
                                         continue
-                            yield {"type": "done", "full_content": accumulated_text}
+                            repaired = StructuredOutputEnforcer.validate_and_repair(
+                                accumulated_text, section_title, [c.get("cell_id", "") for c in cell_mappings]
+                            )
+                            yield {"type": "done", "full_content": repaired["repaired_text"]}
                             return
                         else:
                             resp_text = await resp.aread()
