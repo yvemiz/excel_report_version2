@@ -34,7 +34,7 @@ class TestDynamicOutline(unittest.TestCase):
         print(f"[✓] 基础表格生成了 {len(outline)} 个章节")
 
         # 2. 模拟用户新上传了《2024年科研创新与经费统计.xlsx》
-        custom_catalog = self.pipeline.get_effective_catalog() + [
+        custom_catalog = self.duckdb_engine.get_catalog() + [
             {
                 "table_name": "tbl_2024年科研创新与经费统计",
                 "file_name": "2024年科研创新与经费统计.xlsx",

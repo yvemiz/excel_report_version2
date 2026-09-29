@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import asyncio
 from typing import Dict, Any, List, Callable, Optional, AsyncGenerator
 from app.core.cell_lake import CellLake
@@ -54,12 +53,15 @@ class ReportPipeline:
         self.generated_sections: List[Dict[str, Any]] = []
         self.export_files: Dict[str, str] = {}
 
-    def set_custom_school_name(self, name: str):
-        self.custom_school_name = name.strip()
-
-    def get_effective_catalog(self) -> List[Dict[str, Any]]:
-        """获取当前生效的数据湖元数据目录（优先DuckDB内存宽表，兜底Cell Lake）"""
+    def plan_outline(self) -> List[Dict[str, Any]]:
+        """
+        Stage 1: 规划阶段 - 数据驱动的动态大纲规划器
+        根据 DuckDB 与 Cell Lake 实际扫描到的表格、工作表与表头参数，
+        自动进行主题聚类与动态章节生成，并自适应绑定推荐图表与真实数据。
+        """
         catalog = self.duckdb_engine.get_catalog()
+        
+        # 1. 若内存 catalog 为空，尝试从 CellLake 反查已入库的表格元数据
         if not catalog:
             cell_tables = self.cell_lake.get_tables_summary()
             if cell_tables:
@@ -73,125 +75,21 @@ class ReportPipeline:
                     }
                     for t in cell_tables
                 ]
-        return catalog
 
-    def plan_outline(self) -> List[Dict[str, Any]]:
-        """
-        Stage 1: 规划阶段 - 数据驱动的动态大纲规划器
-        根据 DuckDB 与 Cell Lake 实际扫描到的表格、工作表与表头参数，
-        自动进行主题聚类与动态章节生成，并自适应绑定推荐图表与真实数据。
-        """
-        catalog = self.get_effective_catalog()
+        # 2. 若依然无任何数据，提供标准安全兜底模板
         if not catalog:
             sections = self._get_fallback_outline()
             self.sections_plan = sections
             return sections
 
+        # 3. 动态聚类并自适应生成章节规划
         sections = self._generate_dynamic_sections(catalog)
         self.sections_plan = sections
         return sections
 
-    async def async_plan_outline(self, school_name: str = "") -> List[Dict[str, Any]]:
-        """
-        Stage 1: 异步智能大纲规划器
-        - 在 Pi-Agent 侧车模式下：调用 Node.js Pi-Agent 智能体执行数据湖 Catalog 拓扑分析与智能编排；
-        - 在 Python 原生模式或侧车异常时：自动平滑回退至本地数据驱动规则引擎；
-        - 规划完毕后自动注入 Stage 1 Jev 裁判架构质量与合规性审查。
-        """
-        if school_name:
-            self.set_custom_school_name(school_name)
-
-        catalog = self.get_effective_catalog()
-        if not catalog:
-            sections = self._get_fallback_outline()
-            self.sections_plan = sections
-            return sections
-
-        planned_sections: Optional[List[Dict[str, Any]]] = None
-
-        # 尝试通过 Pi-Agent 侧车智能体进行自主规划
-        if (
-            hasattr(self, "agent_runner")
-            and getattr(self.agent_runner, "agent_mode", "") == "pi_agent"
-            and hasattr(self.agent_runner, "pi_bridge")
-            and self.agent_runner.pi_bridge.is_available()
-        ):
-            try:
-                print("[*] [Stage 1] 正在调用 Node.js Pi-Agent 智能体规划报告章节大纲...")
-                pi_sections = await self.agent_runner.pi_bridge.plan_outline(
-                    api_key=self.agent_runner.api_key,
-                    base_url=self.agent_runner.base_url,
-                    model=self.agent_runner.model,
-                    catalog=catalog,
-                    school_name=self.custom_school_name
-                )
-                if pi_sections and isinstance(pi_sections, list) and len(pi_sections) > 0:
-                    # 补齐学术图表规划与物理数据表预绑定
-                    for sec in pi_sections:
-                        t_name = sec.get("table_name", "")
-                        if not sec.get("bound_tables"):
-                            sec["bound_tables"] = [t_name] if t_name else []
-                        if not sec.get("bound_files"):
-                            sec["bound_files"] = [sec.get("file_name", "")] if sec.get("file_name") else []
-                        if not sec.get("chart_plan") and t_name:
-                            cols = next((c.get("columns", []) for c in catalog if c["table_name"] == t_name), [])
-                            preferred = sec.get("recommended_chart")
-                            sec["chart_plan"] = self._auto_recommend_chart(
-                                t_name, cols, preferred, [c for c in catalog if c["table_name"] == t_name]
-                            )
-                    planned_sections = pi_sections
-                    print(f"[✓] [Stage 1] Pi-Agent 侧车成功规划 {len(pi_sections)} 个章节！")
-            except Exception as e:
-                print(f"[!] [Stage 1] Pi-Agent 大纲规划异常，平滑回退至 Python 规划引擎: {e}")
-
-        # 若侧车未产生结果，执行本地 Python 自适应拓扑规划
-        if not planned_sections:
-            planned_sections = self.plan_outline()
-
-        # 补全可能缺失的预绑定元数据
-        for sec in planned_sections:
-            if not sec.get("bound_tables"):
-                sec["bound_tables"] = [sec.get("table_name")] if sec.get("table_name") else []
-            if not sec.get("bound_files"):
-                sec["bound_files"] = [sec.get("file_name")] if sec.get("file_name") else []
-
-        self.sections_plan = planned_sections
-
-        # Stage 1: Jev 裁判架构质量与合规性严格审查
-        try:
-            print("[*] [Stage 1] 正在通过 Jev 模型对报告大纲结构进行合规性裁决...")
-            jev_outline_res = await self.jev_judge.evaluate_outline(
-                outline=self.sections_plan,
-                catalog=catalog,
-                school_name=self.custom_school_name
-            )
-            self.outline_jev_audit = jev_outline_res
-            print(f"[✓] [Stage 1] Jev 大纲质检完成: 得分 {jev_outline_res.get('structure_score', 0):.2f}, 批准: {jev_outline_res.get('is_approved')}")
-        except Exception as e:
-            print(f"[!] [Stage 1] Jev 大纲质检调用异常: {e}")
-            self.outline_jev_audit = {
-                "structure_score": 0.95,
-                "is_approved": True,
-                "critique": "本地启发式质检通过",
-                "provider": "jev-fallback"
-            }
-
-        return self.sections_plan
-
     def _generate_dynamic_sections(self, catalog: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        基于两级分层拓扑与数据量自适应的大纲规划引擎 (Two-level Hierarchical Topology):
-        1. 宏观领域预绑定 (Table Pre-binding):
-           将 Catalog 所有物理表聚类预分配至各大教育监测评估宏观领域；
-        2. 自适应细分粒度 (Adaptive Density):
-           根据各领域数据表数量 N 动态计算小节数：
-           - N <= 3: 生成 1 个小节，绑定全部 N 个表；
-           - 4 <= N <= 12: 自适应聚类生成 2~4 个小节，切分绑定不同物理子表；
-           - N > 12 (大规模500+表场景): 聚类生成 5~8 个小节，批量绑定对应数据子集；
-        3. 自定义新表动态生长:
-           未命中公文领域的任意新增报表，自适应归类为专题章节或独立评价章节。
-        """
-        DOMAINS = [
+        """基于已加载表格参数，动态规划章节与自适应图表"""
+        THEME_DEFINITIONS = [
             {
                 "key": "overview",
                 "patterns": ["概况", "办学", "基本情况", "1_1", "1-1"],
@@ -231,30 +129,6 @@ class ReportPipeline:
                 "section_title": "国家级与省级一流本科专业建设成效分析",
                 "objective": "分析国家级与省级一流本科专业建设点的获批年度演进与特色示范效应",
                 "default_chart_type": "line"
-            },
-            {
-                "key": "resources",
-                "patterns": ["2_4", "2_5", "2-4", "2-5", "仪器设备", "实验室", "图书藏量", "教学经费", "生均面积"],
-                "chapter_title": "教学资源配置与实验实训保障",
-                "section_title": "教学科研仪器设备与实践基地保障分析",
-                "objective": "系统盘点教学科研仪器设备总值、实践教学基地建设及生均图书资源支撑",
-                "default_chart_type": "bar"
-            },
-            {
-                "key": "student",
-                "patterns": ["6_1", "6_2", "6-1", "6-2", "生源录取", "应届毕业", "初次就业", "升学深造"],
-                "chapter_title": "学生生源素质与就业深造发展",
-                "section_title": "应届毕业生毕业去向与高质量深造态势",
-                "objective": "客观分析本科招生规模结构、毕业生就业落实率及海内外高质量升学深造水平",
-                "default_chart_type": "line"
-            },
-            {
-                "key": "quality",
-                "patterns": ["7_1", "7_2", "7-1", "7-2", "质量监控", "教学督导", "专业认证", "持续改进机制"],
-                "chapter_title": "教学质量监控与常态化持续改进",
-                "section_title": "内部质量保证体系与常态化教学督导运行",
-                "objective": "全面评估学校教学质量常态监控网络、教学督导反馈闭环与质量文化建设成效",
-                "default_chart_type": "column"
             }
         ]
 
@@ -262,8 +136,8 @@ class ReportPipeline:
         sections = []
         theme_index = 0
 
-        # 第一阶段：将 Catalog 表格向宏观领域映射预绑定
-        for t_def in DOMAINS:
+        # 首先尝试命中标准评估公文模式
+        for t_def in THEME_DEFINITIONS:
             matched_tables = []
             for item in catalog:
                 t_name = item.get("table_name", "")
@@ -274,24 +148,18 @@ class ReportPipeline:
                     matched_tables.append(item)
                     assigned_tables.add(item["table_name"])
 
-            if not matched_tables:
-                continue
-
-            theme_index += 1
-            cn_num = CN_NUMS[theme_index - 1] if theme_index <= len(CN_NUMS) else str(theme_index)
-            N = len(matched_tables)
-
-            if N <= 3:
-                # 规则 1: 表数量 <= 3 时，浓缩为 1 个精品小节，绑定该领域所有表
+            if matched_tables:
+                theme_index += 1
+                cn_num = CN_NUMS[theme_index - 1] if theme_index <= len(CN_NUMS) else str(theme_index)
                 primary_table = matched_tables[0]
-                bound_tables = [t["table_name"] for t in matched_tables]
-                bound_files = list(dict.fromkeys(t.get("file_name", "") for t in matched_tables if t.get("file_name")))
+                
                 chart_plan = self._auto_recommend_chart(
                     primary_table["table_name"], 
                     primary_table.get("columns", []), 
                     t_def["default_chart_type"],
                     matched_tables
                 )
+
                 sections.append({
                     "id": f"sec_{theme_index}",
                     "chapter_title": f"第{cn_num}章 {t_def['chapter_title']}",
@@ -301,50 +169,12 @@ class ReportPipeline:
                     "file_name": primary_table.get("file_name", ""),
                     "sheet_name": primary_table.get("sheet_name", ""),
                     "table_name": primary_table.get("table_name", ""),
-                    "bound_tables": bound_tables,
-                    "bound_files": bound_files,
                     "chart_plan": chart_plan
                 })
-            else:
-                # 规则 2: 表数量较多时，自适应切分为多小节 (4<=N<=12 -> 2~4节; N>12 -> 5~8节)
-                k = min(len(matched_tables), max(2, (N + 2) // 3)) if N <= 12 else min(8, max(4, (N + 4) // 5))
-                chunk_size = (N + k - 1) // k
-                for sub_i in range(k):
-                    sub_tables = matched_tables[sub_i * chunk_size : (sub_i + 1) * chunk_size]
-                    if not sub_tables:
-                        continue
-                    pri = sub_tables[0]
-                    raw_fn = os.path.splitext(pri.get("file_name", ""))[0]
-                    clean_name = re.sub(r'^[表\d\-_\.\s]+', '', raw_fn)
-                    sub_title = f"{clean_name}核心指标与演进分析" if clean_name else f"{t_def['section_title']} (第{sub_i+1}部分)"
-                    b_tables = [t["table_name"] for t in sub_tables]
-                    b_files = list(dict.fromkeys(t.get("file_name", "") for t in sub_tables if t.get("file_name")))
-                    c_plan = self._auto_recommend_chart(
-                        pri["table_name"],
-                        pri.get("columns", []),
-                        t_def["default_chart_type"],
-                        sub_tables
-                    )
-                    sections.append({
-                        "id": f"sec_{theme_index}_{sub_i + 1}",
-                        "chapter_title": f"第{cn_num}章 {t_def['chapter_title']}",
-                        "section_title": f"{theme_index}.{sub_i + 1} {sub_title}",
-                        "objective": f"聚焦{', '.join(b_files[:3])}，深入评估{t_def['chapter_title']}相关指标",
-                        "table_keyword": pri.get("file_name", clean_name),
-                        "file_name": pri.get("file_name", ""),
-                        "sheet_name": pri.get("sheet_name", ""),
-                        "table_name": pri.get("table_name", ""),
-                        "bound_tables": b_tables,
-                        "bound_files": b_files,
-                        "chart_plan": c_plan
-                    })
 
-        # 第二阶段：处理未命中标准公文领域的自定义新表
-        unassigned_tables = [item for item in catalog if item["table_name"] not in assigned_tables]
-        
-        if len(unassigned_tables) <= 4:
-            # 数量较少时 (如单元测试中的单个新表)，为每个表单独开辟新章节
-            for item in unassigned_tables:
+        # 对于未能匹配标准模式的任意用户自定义新上传表格，自动动态生长出新章节！
+        for item in catalog:
+            if item["table_name"] not in assigned_tables:
                 theme_index += 1
                 cn_num = CN_NUMS[theme_index - 1] if theme_index <= len(CN_NUMS) else str(theme_index)
                 
@@ -371,43 +201,9 @@ class ReportPipeline:
                     "file_name": item.get("file_name", ""),
                     "sheet_name": item.get("sheet_name", ""),
                     "table_name": item.get("table_name", ""),
-                    "bound_tables": [item["table_name"]],
-                    "bound_files": [item.get("file_name", "")],
                     "chart_plan": chart_plan
                 })
-        else:
-            # 大规模 500+ 自定义表格场景：聚类批处理，按 4~6 个表成一章，避免章节爆炸
-            chunk_size = 5
-            for c_idx in range(0, len(unassigned_tables), chunk_size):
-                sub_unassigned = unassigned_tables[c_idx : c_idx + chunk_size]
-                theme_index += 1
-                cn_num = CN_NUMS[theme_index - 1] if theme_index <= len(CN_NUMS) else str(theme_index)
-                pri = sub_unassigned[0]
-                raw_fn = os.path.splitext(pri.get("file_name", ""))[0]
-                clean_name = re.sub(r'^[表\d\-_\.\s]+', '', raw_fn).replace("数据", "").replace("情况", "").strip() or f"专项指标_{theme_index}"
-                
-                chart_plan = self._auto_recommend_chart(
-                    pri["table_name"],
-                    pri.get("columns", []),
-                    None,
-                    sub_unassigned
-                )
-                b_tables = [t["table_name"] for t in sub_unassigned]
-                b_files = list(dict.fromkeys(t.get("file_name", "") for t in sub_unassigned if t.get("file_name")))
-
-                sections.append({
-                    "id": f"sec_{theme_index}",
-                    "chapter_title": f"第{cn_num}章 {clean_name}等综合专题评价",
-                    "section_title": f"{theme_index}.1 {clean_name}及关联专项指标研判",
-                    "objective": f"联合评估{', '.join(b_files[:3])}等相关报表，提炼专项建设综合成效",
-                    "table_keyword": pri.get("file_name", clean_name),
-                    "file_name": pri.get("file_name", ""),
-                    "sheet_name": pri.get("sheet_name", ""),
-                    "table_name": pri.get("table_name", ""),
-                    "bound_tables": b_tables,
-                    "bound_files": b_files,
-                    "chart_plan": chart_plan
-                })
+                assigned_tables.add(item["table_name"])
 
         return sections if sections else self._get_fallback_outline()
 
@@ -588,7 +384,7 @@ class ReportPipeline:
             }
         ]
 
-    async def execute_pipeline(self, school_name: Optional[str] = None) -> AsyncGenerator[Dict[str, Any], None]:
+    async def execute_pipeline(self) -> AsyncGenerator[Dict[str, Any], None]:
         """
         全自动化执行五阶段流水线，流式推送每个阶段与小节的状态和生成产物
         """
@@ -628,17 +424,13 @@ class ReportPipeline:
             # --- Stage 2: 检索阶段 (纯 Python/DuckDB, 0 Token 定向范围检索) ---
             yield {"type": "section_stage", "section_id": sec_id, "stage": "retrieving", "text": "正在基于定向预绑定表格从 DuckDB 与 Cell Lake 提取数据..."}
             
-            # 优先按小节预绑定的多张物理数据表做定向精准检索 (Targeted Scope Retrieval)
+            # 优先按小节绑定的具体文件名/工作表名做 100% 精确检索
             matched_cells = []
-            bound_files = sec.get("bound_files") or ([sec.get("file_name")] if sec.get("file_name") else [])
+            target_file = sec.get("file_name", "")
             target_sheet = sec.get("sheet_name", "")
 
-            if bound_files:
-                for bf in bound_files[:8]:  # 聚焦该小节绑定的前8个核心物理表格
-                    cells = self.cell_lake.get_cells_by_file_or_sheet(bf, limit=50)
-                    matched_cells.extend(cells)
-            elif sec.get("file_name"):
-                matched_cells = self.cell_lake.get_cells_by_file_or_sheet(sec["file_name"], target_sheet, limit=100)
+            if target_file:
+                matched_cells = self.cell_lake.get_cells_by_file_or_sheet(target_file, target_sheet, limit=100)
 
             if not matched_cells:
                 kw = sec.get("table_keyword", "")
