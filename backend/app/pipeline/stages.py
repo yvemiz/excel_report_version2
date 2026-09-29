@@ -48,6 +48,7 @@ class ReportPipeline:
             {"id": 4, "name": "Stage 4: 质检阶段", "desc": "Cell Lake 物理坐标 100% 反查与 Jev 极速判定", "status": "pending"},
             {"id": 5, "name": "Stage 5: 汇编阶段", "desc": "全文拼接、Word (.docx) 导出与数据穿透对账总表", "status": "pending"}
         ]
+        self.custom_school_name: str = ""
         self.sections_plan: List[Dict[str, Any]] = []
         self.generated_sections: List[Dict[str, Any]] = []
         self.export_files: Dict[str, str] = {}
@@ -295,6 +296,11 @@ class ReportPipeline:
                 "section_title": "1.1 办学历史与发展目标",
                 "objective": "客观阐述学校基础办学性质、办学规模与中长期发展战略规划定位",
                 "table_keyword": "1_1",
+                "file_name": "1-1 学校概况.xls",
+                "sheet_name": "",
+                "table_name": "tbl_1-1",
+                "bound_tables": ["tbl_1-1"],
+                "bound_files": ["1-1 学校概况.xls"],
                 "chart_plan": None
             },
             {
@@ -303,6 +309,11 @@ class ReportPipeline:
                 "section_title": "2.1 教学科研与党政管理支撑体系",
                 "objective": "系统梳理全校党政管理职能部门与各教学科研学院的构架分布",
                 "table_keyword": "1_3",
+                "file_name": "1-3 党政管理机构.xls",
+                "sheet_name": "",
+                "table_name": "tbl_1-3",
+                "bound_tables": ["tbl_1-3"],
+                "bound_files": ["1-3 党政管理机构.xls"],
                 "chart_plan": {
                     "type": "pie",
                     "title": "学校教学科研与管理单位职能分布占比",
@@ -317,6 +328,11 @@ class ReportPipeline:
                 "section_title": "3.1 本科专业结构与学科门类覆盖",
                 "objective": "深入分析各学院设置本科专业的分布形态、学制年限及师范类专业结构占比",
                 "table_keyword": "1_4_1",
+                "file_name": "1-4-1 专业基本情况.xls",
+                "sheet_name": "",
+                "table_name": "tbl_1-4-1",
+                "bound_tables": ["tbl_1-4-1"],
+                "bound_files": ["1-4-1 专业基本情况.xls"],
                 "chart_plan": {
                     "type": "bar",
                     "title": "各二级学院本科专业数量分布情况",
@@ -332,6 +348,11 @@ class ReportPipeline:
                 "section_title": "4.1 博士硕士学位授权点与流动站布局",
                 "objective": "全面论述全校博士后科研流动站、一级博士点、硕士专业学位授权点的层级结构",
                 "table_keyword": "4_1",
+                "file_name": "4-1 学科建设与学位点.xls",
+                "sheet_name": "",
+                "table_name": "tbl_4-1",
+                "bound_tables": ["tbl_4-1"],
+                "bound_files": ["4-1 学科建设与学位点.xls"],
                 "chart_plan": {
                     "type": "column",
                     "title": "高层次学科建设与学位点授权类别分布",
@@ -347,6 +368,11 @@ class ReportPipeline:
                 "section_title": "5.1 国家级与省级一流本科专业成效",
                 "objective": "分析国家级与省级一流本科专业建设点的获批年度演进与特色示范效应",
                 "table_keyword": "4_3",
+                "file_name": "4-3 一流本科专业建设点.xls",
+                "sheet_name": "",
+                "table_name": "tbl_4-3",
+                "bound_tables": ["tbl_4-3"],
+                "bound_files": ["4-3 一流本科专业建设点.xls"],
                 "chart_plan": {
                     "type": "line",
                     "title": "一流本科专业建设点年度获批演进趋势",
@@ -362,15 +388,28 @@ class ReportPipeline:
         """
         全自动化执行五阶段流水线，流式推送每个阶段与小节的状态和生成产物
         """
+        if school_name:
+            self.custom_school_name = school_name.strip()
+
         # ================= Stage 1: 规划阶段 =================
         self.current_stage = 1
         yield {"type": "stage_update", "stage_id": 1, "status": "running"}
-        outline = self.plan_outline()
+
+        detected_meta = self.cell_lake.detect_school_metadata()
+        active_school = self.custom_school_name or detected_meta.get("school_name") or "普通高等学校"
+        outline = await self.async_plan_outline(school_name=active_school)
+
         yield {
             "type": "stage_update",
             "stage_id": 1,
             "status": "completed",
-            "data": {"outline": outline, "sections_count": len(outline)}
+            "data": {
+                "outline": outline,
+                "sections_count": len(outline),
+                "school_name": active_school,
+                "school_metadata": detected_meta,
+                "jev_audit": getattr(self, "outline_jev_audit", None)
+            }
         }
         await asyncio.sleep(0.3)
 
@@ -382,8 +421,8 @@ class ReportPipeline:
             sec_id = sec["id"]
             sec_title = f"{sec['chapter_title']} {sec['section_title']}"
             
-            # --- Stage 2: 检索阶段 (纯 Python/DuckDB, 0 Token) ---
-            yield {"type": "section_stage", "section_id": sec_id, "stage": "retrieving", "text": "正在从 DuckDB 与 Cell Lake 提取数据..."}
+            # --- Stage 2: 检索阶段 (纯 Python/DuckDB, 0 Token 定向范围检索) ---
+            yield {"type": "section_stage", "section_id": sec_id, "stage": "retrieving", "text": "正在基于定向预绑定表格从 DuckDB 与 Cell Lake 提取数据..."}
             
             # 优先按小节绑定的具体文件名/工作表名做 100% 精确检索
             matched_cells = []
@@ -451,7 +490,7 @@ class ReportPipeline:
 
             await asyncio.sleep(0.2)
 
-            # --- Stage 4: 质检阶段 (Python 反查 + Jev 判定) ---
+            # --- Stage 4: 质检阶段 (Python 反查 + Jev 判定与自愈重试) ---
             yield {"type": "section_stage", "section_id": sec_id, "stage": "auditing", "text": "正在执行 100% 单元格反查与 Jev 质量判定..."}
             
             # 1. 正则反查 Cell Lake 物理坐标
@@ -463,6 +502,42 @@ class ReportPipeline:
             # 综合判定
             passed = audit_res["is_approved"] and jev_res["approved"]
             
+            # 若初稿未达标，触发 1 次带反馈的自愈微调重写
+            if not passed:
+                reasons = []
+                if not audit_res["is_approved"]:
+                    reasons.append(f"发现 {audit_res['mismatch_count']} 处引用数值与单元格湖不匹配")
+                if not jev_res["approved"]:
+                    reasons.append(jev_res.get("rejection_reason") or f"逻辑质量分偏低 ({jev_res.get('logic_score', 0):.2f})")
+                rejection_text = "；".join(reasons)
+
+                yield {
+                    "type": "section_stage",
+                    "section_id": sec_id,
+                    "stage": "refining",
+                    "text": f"初稿未达标（{rejection_text}），正在执行自愈二次微调重写..."
+                }
+
+                revised_chunks = []
+                async for chunk_event in self.agent_runner.stream_write_section(sec, retrieved_summary, matched_cells, revision_feedback=rejection_text):
+                    if chunk_event["type"] == "chunk":
+                        revised_chunks.append(chunk_event["text"])
+                        yield {
+                            "type": "section_chunk",
+                            "section_id": sec_id,
+                            "chunk": chunk_event["text"]
+                        }
+                    elif chunk_event["type"] == "done":
+                        full_content = chunk_event["full_content"]
+
+                if revised_chunks and not full_content:
+                    full_content = "".join(revised_chunks)
+
+                # 二次质检断言
+                audit_res = self.audit_service.verify_markdown_text(full_content)
+                jev_res = await self.jev_judge.evaluate_section(sec_title, retrieved_summary, full_content)
+                passed = audit_res["is_approved"] and jev_res["approved"]
+
             yield {
                 "type": "section_stage",
                 "section_id": sec_id,
@@ -480,8 +555,27 @@ class ReportPipeline:
                 "level": 2,
                 "content": full_content,
                 "audit": audit_res,
-                "jev": jev_res
+                "jev": jev_res,
+                "passed": passed
             })
+
+            # 触发大规模长文本增量持久化断点存盘 (Checkpoint for 100+ pages)
+            try:
+                cp_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "checkpoints")
+                os.makedirs(cp_dir, exist_ok=True)
+                cp_file = os.path.join(cp_dir, "pipeline_checkpoint.json")
+                with open(cp_file, "w", encoding="utf-8") as f_cp:
+                    json.dump({
+                        "school_name": active_school,
+                        "completed_sections": len(self.generated_sections),
+                        "total_sections": len(outline),
+                        "sections": [
+                            {"id": s["id"], "title": s["title"], "word_count": len(s["content"]), "passed": s["passed"]}
+                            for s in self.generated_sections
+                        ]
+                    }, f_cp, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
 
             await asyncio.sleep(0.3)
 
@@ -489,7 +583,8 @@ class ReportPipeline:
         self.current_stage = 5
         yield {"type": "stage_update", "stage_id": 5, "status": "running"}
 
-        school_name = "海南师范大学"
+        detected_meta = self.cell_lake.detect_school_metadata()
+        school_name = self.custom_school_name or detected_meta.get("school_name") or "高校"
         report_title = f"{school_name}本科教育教学质量发展检验报告"
 
         # 导出 Word (.docx)
@@ -522,6 +617,7 @@ class ReportPipeline:
             "data": {
                 "export_files": self.export_files,
                 "total_words": sum(len(s["content"]) for s in self.generated_sections),
-                "total_reconciliation_points": len(reconciliation_data)
+                "total_reconciliation_points": len(reconciliation_data),
+                "school_name": school_name
             }
         }

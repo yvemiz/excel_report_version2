@@ -1,4 +1,5 @@
 import os
+import re
 from typing import List, Dict, Any
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
@@ -127,7 +128,8 @@ class ExcelExporter:
                     max_len = max(max_len, len(val_str.encode('gbk', errors='ignore')))
                 ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
 
-        file_name = f"数据穿透审计与指标覆盖清单_{school_name}.xlsx"
+        clean_school = re.sub(r'[^a-zA-Z0-9_\u4e00-\u9fa5]', '', school_name) or "高校"
+        file_name = f"数据穿透审计与指标覆盖清单_{clean_school}.xlsx"
         file_path = os.path.join(self.output_dir, file_name)
         wb.save(file_path)
         return file_path

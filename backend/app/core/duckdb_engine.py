@@ -14,7 +14,13 @@ class DuckDBEngine:
         self.db_path = db_path
         if db_path != ":memory:":
             os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        self.conn = duckdb.connect(self.db_path)
+        try:
+            self.conn = duckdb.connect(self.db_path)
+        except Exception:
+            try:
+                self.conn = duckdb.connect(self.db_path, read_only=True)
+            except Exception:
+                self.conn = duckdb.connect(":memory:")
         self.registered_tables: Dict[str, Dict[str, Any]] = {}
         self._sync_existing_tables()
 
@@ -90,6 +96,16 @@ class DuckDBEngine:
             **info,
             "sample_rows": sample
         }
+
+    def clear(self):
+        """清空所有注册的表与元数据"""
+        try:
+            tables = [r[0] for r in self.conn.execute("SHOW TABLES").fetchall()]
+            for tbl in tables:
+                self.conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+        except Exception:
+            pass
+        self.registered_tables.clear()
 
     def close(self):
         self.conn.close()
