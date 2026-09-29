@@ -1,17 +1,18 @@
-# 高校发展检验报告智能生成系统 (Pi-Agent 工业级侧车流水线版 v2.2)
+# 高校发展检验报告智能生成系统 (Pi-Agent 工业级流水线版 v2.1)
 
-> **基座引擎**：Pi-Agent 侧车智能体 (`pi-main` Node.js 22) + Python 数据工程微服务 (`excel_report_env` Python 3.12)  
-> **核心架构**：确定性分阶段流水线（Deterministic Staged Pipeline）+ Node.js Pi-Agent 侧车智能体节点 + Jev 极速判定  
+> **基座引擎**：Pi-Agent (`pi-main`) + Python 数据工程微服务 (`excel_report_env`)  
+> **核心架构**：确定性分阶段流水线（Deterministic Staged Pipeline）+ 单 Pi-Agent 核心撰写节点 + Jev 极速判定  
 > **交付形态**：白色学术教务风格 Multi-Panel Studio 前端（Vue 3）+ 100% 穿透溯源数据湖（Cell Lake）  
-> **生成模式**：**表格数据驱动的动态大纲**（用户上传任意 Excel，自动推导章节、自适应图表与数据绑定）
+> **生成模式**：**表格数据驱动的动态大纲**（用户上传任意 Excel，自动推导章节与自适应图表）
 
 ---
 
 ## 🌟 系统核心特性
 
-1. **Pi-Agent 跨语言侧车智能体架构 (Route A - Sidecar IPC)**：
-   - 采用标准 `stdio` 管道实现 Python 与 Node.js 22 侧车子进程的异步 IPC 通信，逐行流式接收 JSONL 事件流（`agent_info`、`chunk`、`done`）。
-   - **双引擎自适应切换与平滑降级**：支持 `Pi-Agent 侧车模式` 与 `Python 原生极速模式`，若检测到 Node 运行环境异常，系统自动无感降级至 Python 原生引擎，保证 100% 稳定交付。
+1. **单 Agent 确定性流水线 (0 死循环、0 幻觉)**：
+   - 彻底摒弃多 Agent 自由对话协商缺陷，采用 5 阶段状态机（Stage 1 规划 -> Stage 2 检索 -> Stage 3 撰写 -> Stage 4 质检 -> Stage 5 汇编）。
+   - **数据驱动动态大纲**：Stage 1 自动扫描 DuckDB Catalog 与复合表头，根据用户上传的任意 Excel 报表动态生长对应章节；支持自适应推荐折线图、柱状图或环形图，并由 DuckDB 查询真实数值。
+   - 数据检索阶段坚决由 Python/DuckDB 参数化执行，实现 **0 Token 消耗、毫秒级响应、100% 真实**。
 
 2. **数据驱动动态大纲与智能生长 (Stage 1 AI 规划)**：
    - Stage 1 自动扫描 DuckDB Catalog 与复合表头，根据用户上传的任意 Excel 报表由 Pi-Agent 侧车智能体进行全局章节拓扑编排与图表推荐。
@@ -46,9 +47,7 @@
    - **定向范围检索（Targeted Scope Retrieval）**：Stage 2 仅穿透提取本小节预绑定的表格数据，严格控制上下文，杜绝 20万 Token 上下文超限与大模型注意力发散；
    - **增量断点持久化（Checkpointing）**：每小节完成质检后自动写入 `data/checkpoints/`，保障百页级超长篇幅报告断点续跑。
 
----
-
-### 系统全流程运行架构图
+### 系统全流程运行架构图（通用兼容格式）
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -60,16 +59,16 @@
 │  [SQLite 单元格湖] (物理坐标归档存底) <─> [DuckDB 分析引擎] (0-Token参数化计算)│
 │                                            │                                │
 │                                            ▼                                │
-│  Stage 1: 规划阶段 ───> Pi-Agent 侧车/规则引擎，数据驱动动态规划章节与图表   │
+│  Stage 1: 规划阶段 ───> 扫描 Catalog 与复合表头，数据驱动动态规划章节与图表  │
 │           │                                                                 │
 │           ▼                                                                 │
 │  Stage 2: 检索阶段 ───> 表级精准下推，毫秒级提取真实坐标与统计指标 (0 Token) │
 │           │                                                                 │
 │           ▼                                                                 │
-│  Stage 3: 撰写阶段 ───> Pi-Agent 侧车流式撰写 + 注入 [数值][^cell_id] 锚点    │
+│  Stage 3: 撰写阶段 ───> Pi-Agent 学术流式撰写 + 注入 [数值][^cell_id] 锚点   │
 │           │            + 触发 chart-tool 自动直插 300DPI 学术统计图表       │
 │           ▼                                                                 │
-│  Stage 4: 质检阶段 ───> 100% 单元格反查严格断言 + Jev 极速打分 (失败自动重写) │
+│  Stage 4: 质检阶段 ───> 100% 单元格反查严格断言 + Jev 极速质量打分 (0.95/通过)│
 │           │                                                                 │
 │           ▼                                                                 │
 │  Stage 5: 汇编阶段 ───> 导出学术 Word 研报 (.docx) + 数据穿透对账表 (.xlsx) │
@@ -95,8 +94,6 @@ excel_report/
 │   ├── requirements.txt            # Python 核心依赖清单 (Python 3.12)
 │   ├── test_core.py                # 底座核心模块 (STC/CellLake/DuckDB) 单元测试
 │   ├── test_dynamic_outline.py     # 数据驱动动态大纲与自适应图表推导测试
-│   ├── test_xlsx_and_custom_school.py # .xlsx 复合表头与学校名称嗅探集成测试
-│   ├── test_pi_bridge.py           # Pi-Agent 跨语言 IPC 桥接与大纲流式测试
 │   ├── test_e2e_pipeline.py        # 端到端 5 阶段全自动化流水线集成测试
 │   ├── app/
 │   │   ├── config.py               # 项目路径与模型服务环境变量配置
@@ -107,12 +104,11 @@ excel_report/
 │   │   │   ├── duckdb_engine.py    # DuckDB 列式指标分析引擎 (0 Token 参数化计算)
 │   │   │   ├── chart_service.py    # Matplotlib 300DPI 学术统计图表渲染引擎
 │   │   │   ├── audit_service.py    # 正则反查与 100% 单元格坐标穿透断言服务
-│   │   │   ├── docx_exporter.py    # 学术规范 Word (.docx) 封面/TOC/图文研报导出器
+│   │   │   ├── docx_exporter.py    # 学术规范 Word (.docx) 图文研报导出器
 │   │   │   └── excel_exporter.py   # 数据穿透对账总表 (.xlsx) 双表导出器
 │   │   ├── pipeline/               # 确定性 5 阶段调度核心
-│   │   │   ├── stages.py           # 5 阶段流水线调度器 (含自愈重审与图表规划)
-│   │   │   ├── agent_runner.py     # Pi-Agent 撰写调度器 (支持 Pi 侧车/Python 原生)
-│   │   │   ├── pi_bridge.py        # Python 与 Node.js Pi-Agent stdio IPC 桥接器
+│   │   │   ├── stages.py           # 5 阶段流水线调度器 (含动态大纲与自适应图表)
+│   │   │   ├── agent_runner.py     # 单 Pi-Agent 核心学术研报撰写节点 (流式/确定性)
 │   │   │   └── jev_judge.py        # Jev 极速质量决策与逻辑打分器
 │   │   └── api/                    # RESTful & WebSocket API 路由
 │   │       ├── routes_upload.py    # 文件上传、STC 解析与示例数据载入 API
@@ -127,18 +123,17 @@ excel_report/
 ├── frontend/                       # Vue 3 前端工程 (Vite + TypeScript + Pinia)
 │   ├── package.json                # 前端依赖配置
 │   ├── tsconfig.json               # TypeScript 配置文件
-│   ├── vite.config.ts              # Vite 代理与工程构建配置 (代理至 8008 端口)
+│   ├── vite.config.ts              # Vite 代理与工程构建配置
 │   ├── index.html                  # 单页面应用入口
 │   └── src/
 │       ├── App.vue                 # 白色教务公文风 Multi-Panel Studio 主工作台
 │       ├── style.css               # 学术公文规范排版设计系统
 │       └── main.ts                 # Vue 应用初始化入口
-├── example/                        # 高校真实本科教学状态评估报表 (.xls)
-├── pi-main/                        # Pi-Agent 底座工程
-│   └── pi_agent_sidecar.mjs        # Node.js 22 原生 ES Module 侧车智能体执行器
-├── run_backend.bat                 # 后端一键启动脚本 (端口 8008，ANSI/GBK CRLF 格式)
-├── run_frontend.bat                # 前端一键启动脚本 (端口 5173，ANSI/GBK CRLF 格式)
-├── start_all.bat                   # 前后端双服务一键联动启动脚本 (ANSI/GBK 格式)
+├── example/                        # 8 份高校真实本科教学状态评估报表 (.xls)
+├── pi-main/                        # Pi-Agent 底座源码及插件套件
+├── run_backend.bat                 # 后端一键启动脚本 (端口 8000，GBK 编码)
+├── run_frontend.bat                # 前端一键启动脚本 (端口 5173，GBK 编码)
+├── start_all.bat                   # 前后端双服务一键联动启动脚本 (GBK 编码)
 └── start_all.ps1                   # PowerShell 跨平台双服务启动脚本
 ```
 
@@ -189,12 +184,6 @@ excel_report/
   cd frontend
   npm install
   ```
-* **自动化测试运行**：
-  ```bash
-  cd backend
-  python -m unittest test_core.py test_dynamic_outline.py test_xlsx_and_custom_school.py
-  python test_pi_bridge.py
-  python test_e2e_pipeline.py
-  ```
+* **一键启动**：日常开发双击根目录的 `start_all.bat` 即可同时启动前后端。
 
-> 📘 完整的团队协作与开发分支规范，请参阅根目录专属指南：[**`CONTRIBUTING.md`**](file:///d:/vs_project/excel_report/CONTRIBUTING.md)。
+> 📘 完整的开发准则、冲突解决与提交流程，请参阅根目录专属指南：[**`CONTRIBUTING.md`**](file:///d:/vs_project/excel_report/CONTRIBUTING.md)。
