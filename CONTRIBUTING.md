@@ -1,0 +1,71 @@
+# 团队协作开发指南与规范 (Contributing Guide)
+
+欢迎参与本项目开发！为了保证代码质量与版本库干净稳定，请所有开发同学严格遵守本规范。
+
+---
+
+## 🚫 新手开发“四大禁令”（绝对红线）
+
+1. **绝对禁止直接在 `main` / `master` 分支写代码并提交**。
+2. **绝对禁止使用 `git push --force` 或 `-f` 强推覆盖代码**。
+3. **绝对禁止将任何真实密钥（如 `sk-...` API Key）或私人密码写入代码文件**。
+4. **绝对禁止向 Git 提交 `.env`、`node_modules/`、`__pycache__/`、`*.db` 等缓存或数据库文件**。
+
+---
+
+## 🚀 标准开发流程：四步走
+
+### 第一步：同步最新代码并创建个人功能分支
+
+每次准备写新功能或修 Bug 前，先拉取主干最新进度，然后切出新分支：
+
+```bash
+# 1. 切回主分支
+git checkout master
+
+# 2. 拉取最新进度
+git pull origin master
+
+# 3. 创建并切换到自己的功能分支 (分支命名规则：feature/功能简写-你的名字 或 fix/bug名称)
+git checkout -b feature/upload-excel-zhangsan
+```
+
+### 第二步：在个人分支上进行本地开发与调试
+
+- 后端开发：在 `backend/` 目录下调试，新增依赖请同步记录到 `requirements.txt`。
+- 前端开发：在 `frontend/` 目录下调试，新增依赖请同步记录到 `package.json`。
+
+### 第三步：提交前自检并推送到远端
+
+**在执行 `git add` 前，请务必查看变动文件：**
+
+```bash
+# 1. 检查本次修改了哪些文件，确保没有误加临时文件或大文件
+git status
+
+# 2. 仅添加你需要提交的代码文件（不要无脑 git add .）
+git add backend/app/xxx.py frontend/src/xxx.vue
+
+# 3. 提交说明请清晰明了
+git commit -m "feat: 新增Excel多表头自适应解析功能"
+
+# 4. 推送到远端自己的分支
+git push origin feature/upload-excel-zhangsan
+```
+
+### 第四步：在 GitHub 网页上发起 Pull Request (PR)
+
+1. 打开 GitHub 仓库页面，点击 **“Compare & pull request”** 按钮。
+2. 目标分支选择 `base: master`，源分支选择 `compare: feature/upload-excel-zhangsan`。
+3. 详细填写 PR 说明：修改了什么、如何测试验证、是否有未完成事项。
+4. 提交 PR 后，等待 **GitHub Actions 自动化检查** 全部变绿（通过）。
+5. 联系项目负责人进行 **Code Review**，审核通过后由负责人统一合并。
+
+---
+
+## 💡 常见问题与踩坑提醒
+
+- **Q: 误将 `.env` 或数据库文件加进去了怎么办？**
+  - 在未 push 前，执行 `git rm --cached <文件名>`，撤销暂存区追踪。
+- **Q: 提示有分支冲突（Conflict）无法合并？**
+  - 切回个人分支，执行 `git fetch origin master` 并 `git merge origin/master`，在 VS Code 中逐处比对保留正确内容，重新 commit 并 push 即可。

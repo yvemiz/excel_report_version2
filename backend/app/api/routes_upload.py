@@ -1,0 +1,115 @@
+import os
+import shutil
+from typing import List, Dict, Any
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from app.config import settings
+from app.core.stc_parser import STCParser
+from app.core.cell_lake import CellLake
+from app.core.duckdb_engine import DuckDBEngine
+
+router = APIRouter(prefix="/api", tags=["Upload & Data Ingestion"])
+
+# 全局单例引用（在 main.py 中注入初始化）
+cell_lake_instance: CellLake = None
+duckdb_instance: DuckDBEngine = None
+
+def init_upload_routes(lake: CellLake, duck: DuckDBEngine):
+    global cell_lake_instance, duckdb_instance
+    cell_lake_instance = lake
+    duckdb_instance = duck
+
+@router.post("/upload")
+async def upload_excel(files: List[UploadFile] = File(...)):
+    """上传一个或多个 Excel 文件并执行 STC 解析、Cell Lake 入库和 DuckDB 注册"""
+    if not files:
+        raise HTTPException(status_code=400, detail="未上传任何文件")
+
+    uploaded_summary = []
+    total_cells_added = 0
+
+    for file in files:
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in [".xls", ".xlsx"]:
+            continue
+
+        save_path = os.path.join(settings.UPLOAD_DIR, file.filename)
+        with open(save_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # STC 复合表头解析
+        sheets_data = STCParser.parse_file(save_path)
+        for s in sheets_data:
+            c_count = cell_lake_instance.insert_cells(s["cells"])
+            total_cells_added += c_count
+            tbl_name = duckdb_instance.register_sheet(s["sheet_name"], s["file_name"], s["rows"], s["header_paths"])
+            uploaded_summary.append({
+                "file_name": s["file_name"],
+                "sheet_name": s["sheet_name"],
+                "row_count": s["row_count"],
+                "col_count": s["col_count"],
+                "cells_count": len(s["cells"]),
+                "table_name": tbl_name,
+                "fingerprint": s["fingerprint"],
+                "headers": s["header_paths"][:8]
+            })
+
+    return {
+        "success": True,
+        "message": f"成功解析 {len(uploaded_summary)} 个工作表，录入 {total_cells_added} 个单元格物理坐标",
+        "sheets": uploaded_summary,
+        "total_cells": cell_lake_instance.count()
+    }
+
+@router.post("/load_example_data")
+async def load_example_data():
+    """一键加载 example/ 目录下的 8 个高校真实报表数据"""
+    example_dir = os.path.join(os.path.dirname(settings.BASE_DIR), "example")
+    if not os.path.exists(example_dir):
+        raise HTTPException(status_code=404, detail="example 目录不存在")
+
+    cell_lake_instance.clear()
+    loaded = []
+    total_cells = 0
+
+    for f in sorted(os.listdir(example_dir)):
+        if f.endswith(".xls") or f.endswith(".xlsx"):
+            fp = os.path.join(example_dir, f)
+            parsed_sheets = STCParser.parse_file(fp)
+            for ps in parsed_sheets:
+                c_cnt = cell_lake_instance.insert_cells(ps["cells"])
+                total_cells += c_cnt
+                tbl = duckdb_instance.register_sheet(ps["sheet_name"], ps["file_name"], ps["rows"], ps["header_paths"])
+                loaded.append({
+                    "file_name": ps["file_name"],
+                    "sheet_name": ps["sheet_name"],
+                    "row_count": ps["row_count"],
+                    "cells_count": len(ps["cells"]),
+                    "table_name": tbl,
+                    "headers": ps["header_paths"]
+                })
+
+    return {
+        "success": True,
+        "message": f"成功加载 8 个高校状态报表，共计 {total_cells} 个单元格坐标进入 Cell Lake",
+        "sheets": loaded,
+        "total_cells": cell_lake_instance.count()
+    }
+
+@router.get("/tables")
+async def get_tables():
+    """获取 DuckDB 目录层与数据指标列表"""
+    return {
+        "catalog": duckdb_instance.get_catalog(),
+        "total_cells": cell_lake_instance.count()
+    }
+
+@router.get("/cell/{cell_id}")
+async def get_cell_detail(cell_id: str):
+    """根据 cell_id 查询单元格物理坐标与值（用于前端 Hover 穿透气泡）"""
+    cell = cell_lake_instance.get_cell(cell_id)
+    if not cell:
+        raise HTTPException(status_code=404, detail="未找到该单元格记录")
+    return {
+        "success": True,
+        "cell": cell
+    }
