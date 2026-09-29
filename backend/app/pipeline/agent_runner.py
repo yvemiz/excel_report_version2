@@ -83,6 +83,8 @@ class PiAgentRunner:
                     if item["type"] == "chunk":
                         pi_full_content += item["text"]
                         yield item
+                    elif item["type"] in ("tool_execution_start", "tool_execution_end", "chart_generated", "agent_info"):
+                        yield item
                     elif item["type"] == "done":
                         pi_full_content = item["full_content"]
                         full_res = f"{chart_markdown}{pi_full_content}" if chart_markdown else pi_full_content

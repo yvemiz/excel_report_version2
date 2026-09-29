@@ -1,0 +1,10 @@
+{
+  "name": "pi-agent-headless-sidecar",
+  "version": "3.0.0",
+  "description": "Headless Autonomous ReAct Pi-Agent Core Runner",
+  "type": "module",
+  "scripts": {
+    "bundle": "npx esbuild pi_agent_headless.ts --bundle --platform=node --format=esm --outfile=pi_agent_core_bundle.mjs",
+    "test": "node pi_agent_core_bundle.mjs"
+  }
+}
