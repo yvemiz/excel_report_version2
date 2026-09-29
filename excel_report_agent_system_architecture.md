@@ -19,43 +19,70 @@
 
 ```mermaid
 graph TD
-    subgraph UI ["🖥️ 前端展示层 (Multi-Panel Studio)"]
-        UI_Template["左侧：模板库与指标图导航"]
+    subgraph UI ["前端展示层 (Multi-Panel Studio)"]
+        UI_Template["左侧：数据湖与指标图导航"]
         UI_Pipeline["中间：流水线执行监控与 Jev 判定卡片"]
-        UI_Report["右侧：交互式报告预览 (单元格穿透溯源)"]
+        UI_Report["右侧：交互式报告预览与单元格穿透溯源"]
     end
 
-    subgraph Pipeline ["⚙️ 确定性调度流水线 (Node.js / pi-agent-core 驱动)"]
-        Stage1["1. 规划阶段 (规范模板库优先，可选 LLM 辅助)"]
+    subgraph Pipeline ["确定性调度流水线 (5-Stage Pipeline)"]
+        Stage1["1. 规划阶段 (数据驱动动态大纲与自适应图表推荐)"]
         Stage2["2. 检索阶段 (纯 Python / DuckDB 参数化查询，0 幻觉)"]
-        Stage3["3. 撰写阶段 (🌟 Pi-Agent 核心：流式学术研报撰写)"]
-        Stage4["4. 质检阶段 (Python 代码反查 100% 吻合 + Jev 毫秒级打分)"]
-        Stage5["5. 汇编阶段 (全文拼接润色 + Word 图文与对账表导出)"]
+        Stage3["3. 撰写阶段 (Pi-Agent 核心：流式学术研报撰写)"]
+        Stage4["4. 质检阶段 (Python 代码反查 100% 吻合 + Jev 极速打分)"]
+        Stage5["5. 汇编阶段 (全文拼接 + Word 图文与 Excel 对账表导出)"]
     end
 
-    subgraph Plugins ["🔌 Pi-Agent 扩展与插件套件"]
+    subgraph Plugins ["Pi-Agent 扩展与插件套件"]
         P_Mermaid["grok-mermaid (流程/结构图渲染)"]
         P_Chart["chart-tool (Python 矢量数据图生成)"]
-        P_Jev["jev-router/classifier (Jev 毫秒级决策判定)"]
+        P_Jev["jev-router (Jev 毫秒级决策判定)"]
         P_Compact["custom-compaction (上下文分层压缩)"]
         P_Struct["structured-output (强类型 JSON 截断)"]
-        P_Todo["todo / progress (章节生成看板)"]
-        P_RPC["rpc-extension-ui / Chord (前后端解耦)"]
+        P_Todo["todo (章节生成看板)"]
+        P_RPC["rpc-extension-ui (前后端解耦通信)"]
     end
 
-    subgraph DataEngine ["📊 数据工程底座 (Python FastAPI + DuckDB)"]
+    subgraph DataEngine ["数据工程底座 (Python FastAPI + DuckDB)"]
         STC_Parser["STC 复合表头结构感知解析器"]
         Fingerprint["模板指纹识别与同构聚类"]
-        SAT_Graph["SAT-Graph 指标拓扑网 (NetworkX)"]
+        SAT_Graph["SAT-Graph 指标拓扑网"]
         Cell_Lake["底层：单元格溯源湖 (Cell Lake)"]
-        DuckDB_Engine["分析层：DuckDB 列式指标宽表 (Parquet)"]
+        DuckDB_Engine["分析层：DuckDB 列式指标宽表"]
     end
 
-    UI <-->|WebSocket / RPC| Pipeline
+    UI --> Pipeline
     Pipeline --> Plugins
-    Stage2 & Stage4 <-->|内部 REST / Tool Call| DataEngine
-    Stage3 --> Local_LLM["本地大模型 (vLLM / Ollama)"]
+    Stage2 --> DataEngine
+    Stage4 --> DataEngine
+    Stage3 --> LLM_Node["大模型推理节点 (DeepSeek / 本地模型)"]
 ```
+
+### 通用系统架构图（全终端 100% 文本保真兼容）
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      🖥️ 前端展示层 (Multi-Panel Studio)                     │
+│  [左侧: 数据湖与指标导航]    [中间: 5阶段流水线与Jev卡片]   [右侧: 报告预览与穿透气泡]│
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │ WebSocket / HTTP SSE
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                   ⚙️ 确定性调度流水线 (Deterministic Pipeline)                │
+│  1. 规划阶段 (数据驱动动态大纲) ➔ 2. 检索阶段 (DuckDB 0 Token) ➔             │
+│  3. 撰写阶段 (Pi-Agent 核心撰写) ➔ 4. 质检阶段 (反查+Jev打分) ➔ 5. 汇编导出   │
+└──────────────┬───────────────────────────────────────────────┬──────────────┘
+               │ 调用工具扩展                                   │ 参数化下推
+               ▼                                               ▼
+┌──────────────────────────────┐              ┌──────────────────────────────┐
+│  🔌 Pi-Agent 插件套件        │              │  📊 数据工程底座 (Python)    │
+│  • chart-tool (300DPI 统计图)│              │  • STC 复合表头解析器        │
+│  • grok-mermaid (拓扑流程图) │              │  • SQLite 单元格溯源湖       │
+│  • jev-router (极速打分器)   │              │  • DuckDB 列式指标宽表       │
+│  • todo.ts (执行进度看板)    │              │  • 100% 单元格坐标反查服务   │
+└──────────────────────────────┘              └──────────────────────────────┘
+```
+
 
 ---
 
@@ -119,26 +146,26 @@ graph TD
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as 用户 / 评估专家
-    participant Pipe as ⚙️ Pipeline 控制器 (Node.js)
-    participant Data as 📊 数据工程引擎 (Python/DuckDB)
-    participant Pi as 📝 Pi-Agent (核心撰写节点)
-    participant Jev as ⚡ Jev 决策模型 (质检断言)
+    actor User as 用户评估专家
+    participant Pipe as Pipeline控制器
+    participant Data as 数据工程引擎
+    participant Pi as Pi-Agent撰写节点
+    participant Jev as Jev决策模型
 
     User->>Pipe: 上传 Excel 数据集，触发报告生成
-    Pipe->>Pipe: 加载标准高校规范模板 (或结合粗索引微调大纲)
-    Pipe-->>User: 呈现大纲供确认 (Stage 1 完成)
+    Pipe->>Pipe: 动态规划大纲与自适应推荐图表 (Stage 1 完成)
+    Pipe-->>User: 呈现动态大纲与章节目标
 
-    loop 逐章节顺序或并发执行
-        Pipe->>Data: Stage 2: 参数化提取该章节指标数据 (毫秒级, 0 Token)
-        Data-->>Pipe: 返回规整结构化 JSON 数据集
+    loop 逐章节顺序执行 (Stage 2 到 4)
+        Pipe->>Data: Stage 2: 参数化提取该章节指标数据 (0 Token)
+        Data-->>Pipe: 返回规整结构化数据与物理单元格坐标
         
-        Pipe->>Pi: Stage 3: 调用 Pi-Agent 流式撰写本章节 Markdown 正文
-        Note over Pi: 注入溯源语法: [^doc_cell_id]<br/>可调用 chart-tool 生成图表
+        Pipe->>Pi: Stage 3: 流式撰写本章节研报正文
+        Note over Pi: 注入真实数值与溯源锚点，调用 chart-tool 生成图表
         Pi-->>Pipe: 流式返回章节正文与引用标记
         
         Pipe->>Data: Stage 4: 正则提取数字，严格反查 Cell Lake (100% 吻合)
-        Pipe->>Jev: Stage 4: 调用 classify() 快速打分 (Score: 0~1.0, 100ms)
+        Pipe->>Jev: Stage 4: 极速质量决策打分 (Score: 0~1.0)
         
         alt 校验通过 (得分 >= 0.85 且数字 100% 溯源)
             Pipe->>Pipe: 标记章节完成，更新 todo 看板
@@ -149,6 +176,43 @@ sequenceDiagram
 
     Pipe->>User: Stage 5: 拼接完整报告，导出 Word (.docx) 与穿透审计总表
 ```
+
+### 通用业务时序图（全终端 100% 兼容文本格式）
+
+```text
+ 用户 / 评估专家         Pipeline 控制器          数据工程引擎 (DuckDB/Lake)    Pi-Agent 核心撰写节点        Jev 质检判定模型
+      │                         │                            │                           │                       │
+      │ 1. 上传 Excel 报表       │                            │                           │                       │
+      ├────────────────────────>│                            │                           │                       │
+      │                         │ 2. 数据驱动动态大纲规划      │                           │                       │
+      │< - - - - - - - - - - - -┤ (Stage 1 完成)             │                           │                       │
+      │   呈现动态章节与图表计划 │                            │                           │                       │
+      │                         │                            │                           │                       │
+      │                         │==== [逐章节循环执行 Stage 2 ~ Stage 4] ===============================================│
+      │                         │ 3. 参数化提取指标与坐标     │                           │                       │
+      │                         ├───────────────────────────>│                           │                       │
+      │                         │<───────────────────────────┤                           │                       │
+      │                         │    返回结构化真实数据      │                           │                       │
+      │                         │                            │                           │                       │
+      │                         │ 4. 流式撰写正文与图表直插  │                           │                       │
+      │                         ├───────────────────────────────────────────────────────>│                       │
+      │                         │< - - - - - - - - - - - - - - - - - - - - - - - - - - - ┤                       │
+      │                         │    流式推送 [数值][^cell_id] 锚点与 300DPI 统计图      │                       │
+      │                         │                                                        │                       │
+      │                         │ 5. 100% 单元格反查与 Jev 质量判定                      │                       │
+      │                         ├───────────────────────────>│                           │                       │
+      │                         │<───────────────────────────┤                           │                       │
+      │                         │    机器断言: 100% 坐标吻合 │                           │                       │
+      │                         ├───────────────────────────────────────────────────────────────────────────────>│
+      │                         │<───────────────────────────────────────────────────────────────────────────────┤
+      │                         │    Jev 逻辑打分 (0.95/通过)│                           │                       │
+      │                         │========================================================================================│
+      │                         │                                                        │                       │
+      │ 6. 导出最终双成果物     │                                                        │                       │
+      │<────────────────────────┤                                                        │                       │
+      │  Word 研报 + 穿透总表   │                                                        │                       │
+```
+
 
 ### 为什么这一流水线设计绝对优于自由多 Agent？
 1. **0 幻觉数据下钻**：检索阶段不是让 LLM 自由猜 SQL，而是 Python 代码根据章节元数据直接执行预置 DuckDB 函数，数据提取成功率从 LLM 的 75% 跃升至 **100%**；
@@ -266,9 +330,19 @@ gantt
     section 阶段三：Jev 质检与对账闭环
     Jev 模型 / 本地 Judge 接入封装     :c1, 2026-10-29, 4d
     正则反查 Cell Lake 自动化断言开发  :c2, after c1, 4d
-    对账对账总表与 Word 导出对接       :c3, after c2, 5d
+    对账总表与 Word 导出对接           :c3, after c2, 5d
 
     section 阶段四：前端 Studio 联调与压测
     Multi-Panel Studio 前端面板开发   :d1, 2026-11-11, 7d
     海量 Excel 批量归档与生成压测      :d2, after d1, 5d
 ```
+
+### 实施路线一览表（通用文本视图）
+
+| 实施阶段 | 核心攻坚模块 | 关键交付物 | 达成目标 |
+| :--- | :--- | :--- | :--- |
+| **阶段一：数据与解析底座** | STC复合表头解析、Cell Lake、DuckDB指标库 | `stc_parser.py`, `cell_lake.db`, `metrics.duckdb` | 消除合并单元格缺损，构建真实物理坐标湖 |
+| **阶段二：Pi-Agent 扩展与撰写** | chart-tool 图表生成、动态大纲规划器、流式Prompt | `agent_runner.py`, `chart_service.py` | 300DPI 图表直插、注入真实数值与溯源锚点 |
+| **阶段三：质检断言与双导出** | 100% 正则反查、Jev 毫秒打分、Word/Excel 导出器 | `audit_service.py`, `jev_judge.py`, `docx_exporter.py` | 机器双重断言、生成带公文规范的报告与对账表 |
+| **阶段四：前端 Studio 与联调** | Vue 3 三栏教务风面板、悬浮反查气泡、全链路压测 | `App.vue`, `style.css`, `test_e2e_pipeline.py` | 实时流式监控、毫秒级穿透查验、端到端一键闭环 |
+
