@@ -99,9 +99,41 @@ class CellLake:
             cursor.execute("SELECT * FROM cell_lake LIMIT ?", (limit,))
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_cells_by_file_or_sheet(self, file_name: str, sheet_name: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
+        """按来源文件名与工作表名精确提取单元格"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            if sheet_name:
+                cursor.execute("""
+                SELECT * FROM cell_lake 
+                WHERE (file_name = ? OR file_name LIKE ?) AND sheet_name = ?
+                LIMIT ?
+                """, (file_name, f"%{file_name}%", sheet_name, limit))
+            else:
+                cursor.execute("""
+                SELECT * FROM cell_lake 
+                WHERE file_name = ? OR file_name LIKE ?
+                LIMIT ?
+                """, (file_name, f"%{file_name}%", limit))
+            return [dict(r) for r in cursor.fetchall()]
+
+    def get_tables_summary(self) -> List[Dict[str, Any]]:
+        """获取所有入湖表格与工作表的汇总清单及单元格统计"""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+            SELECT file_name, sheet_name, COUNT(*) as cell_count 
+            FROM cell_lake 
+            GROUP BY file_name, sheet_name
+            ORDER BY file_name
+            """)
+            return [dict(r) for r in cursor.fetchall()]
+
     def count(self) -> int:
         """统计入湖单元格总量"""
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM cell_lake")
             return cursor.fetchone()[0]
+
+
