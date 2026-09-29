@@ -190,7 +190,7 @@ class DocxExporter:
                 if line_str.startswith("### "):
                     continue
 
-                # 普通段落渲染
+                # 普通段落渲染：首行缩进，高保真学术公文排版
                 p = doc.add_paragraph()
                 p.paragraph_format.line_spacing = 1.3
                 p.paragraph_format.space_after = Pt(6)

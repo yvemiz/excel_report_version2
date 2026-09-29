@@ -1,5 +1,6 @@
 import os
 import uuid
+import threading
 from typing import List, Dict, Any, Optional
 import matplotlib
 matplotlib.use("Agg")  # 非交互模式
@@ -26,13 +27,29 @@ class ChartService:
     """
     Python 高清学术统计图表生成服务 (chart-tool 后端底座)
     支持柱状图、折线图、饼图/环形图、雷达图等，产出 300 DPI 矢量级 PNG 图片
+    内置线程锁保障并发调度下的 Matplotlib 全局状态安全
     """
 
     def __init__(self, output_dir: str):
         self.output_dir = output_dir
+        self._lock = threading.Lock()
         os.makedirs(self.output_dir, exist_ok=True)
 
     def generate_chart(
+        self,
+        chart_type: str,
+        title: str,
+        labels: List[str],
+        data: List[float],
+        series_name: str = "数值",
+        x_label: Optional[str] = None,
+        y_label: Optional[str] = None
+    ) -> Dict[str, str]:
+        """根据类型生成统计图并保存（并发安全加锁）"""
+        with self._lock:
+            return self._unsafe_generate_chart(chart_type, title, labels, data, series_name, x_label, y_label)
+
+    def _unsafe_generate_chart(
         self,
         chart_type: str,
         title: str,

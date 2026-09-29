@@ -70,6 +70,7 @@ venv.bak/
 backend/data/*.db*
 backend/data/*.duckdb*
 backend/data/*.wal
+backend/data/*.jsonl
 
 # 动态上传的文件（保留 .gitkeep）
 backend/data/uploads/*

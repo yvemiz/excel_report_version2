@@ -47,9 +47,17 @@
           ⚙️ 模型设置 (DeepSeek)
         </button>
 
-        <button class="btn-primary" @click="startPipeline" :disabled="isPipelineRunning || totalCellsInLake === 0">
+        <button class="btn-secondary" @click="fetchBalance" :title="'DeepSeek 账户余额与 Token 消耗监测'">
+          🪙 {{ balanceInfo.balance_cny !== '--' ? `余额: ¥${balanceInfo.balance_cny}` : (telemetrySummary.total_tokens_consumed > 0 ? `已耗 Token: ${telemetrySummary.total_tokens_consumed}` : 'Token/余额') }}
+        </button>
+
+        <button class="btn-primary" @click="() => startPipeline(false)" :disabled="isPipelineRunning || totalCellsInLake === 0">
           <span v-if="isPipelineRunning">⏳ 流水线执行中...</span>
           <span v-else>🚀 启动全流程生成流水线</span>
+        </button>
+
+        <button class="btn-secondary" @click="() => startPipeline(true)" :disabled="isPipelineRunning || totalCellsInLake === 0" title="从历史检查点快速恢复，跳过已完成章节">
+          ⚡ 断点续生 / 恢复
         </button>
       </div>
     </header>
@@ -160,6 +168,9 @@
             >
               <div class="todo-card-header">
                 <span class="todo-title">{{ sec.chapter_title }} {{ sec.section_title }}</span>
+                <span v-if="sec.subagent_title" class="badge badge-purple" style="font-size: 11px; margin-left: 4px;">
+                  🤖 {{ sec.subagent_title }}
+                </span>
                 <span class="badge" :class="getSectionBadgeClass(sec.status)">
                   {{ getSectionStatusText(sec.status) }}
                 </span>
@@ -485,7 +496,7 @@ const renderedReportHtml = computed(() => {
 
   // 2. 将 [数值][^cell_xxx] 替换为带 data-cell-id 的 HTML span
   const processedMd = fullMd.replace(
-    /\[([^\]]+)\]\[\^(cell_[a-f0-9]+)\]/g,
+    /\[([^\]]+)\]\[\^(cell_[a-zA-Z0-9_]+)\]/g,
     '<span class="lake-citation" data-cell-id="$2">$1</span>'
   )
 
@@ -500,6 +511,23 @@ function addLog(msg: string) {
   const time = new Date().toTimeString().split(' ')[0]
   executionLogs.value.push({ time, msg })
   if (executionLogs.value.length > 50) executionLogs.value.shift()
+}
+
+// 全链路可观测性与 DeepSeek 余额状态
+const balanceInfo = ref({ balance_cny: '--', status: '', currency: 'CNY' })
+const telemetrySummary = ref({ total_sections_traced: 0, total_tokens_consumed: 0, total_cost_cny: 0 })
+
+async function fetchBalance() {
+  try {
+    const res = await fetch('/api/pipeline/balance')
+    const data = await res.json()
+    balanceInfo.value = data
+    if (data.token_burn_summary) {
+      telemetrySummary.value = data.token_burn_summary
+    }
+  } catch (e) {
+    console.error('Fetch balance error:', e)
+  }
 }
 
 // 加载健康状态与表格列表
@@ -611,8 +639,8 @@ async function saveLlmConfig() {
   }
 }
 
-// 启动流水线
-async function startPipeline() {
+// 启动流水线 (支持 resume 断点续生)
+async function startPipeline(resume: boolean = false) {
   if (isPipelineRunning.value) return
   isPipelineRunning.value = true
   currentStage.value = 1
@@ -672,6 +700,13 @@ async function startPipeline() {
         currentRunningText.value = data.text || ''
         const sec = sections.value.find(s => s.id === data.section_id)
         if (sec) {
+          if (data.subagent_title) {
+            sec.subagent_title = data.subagent_title
+            sec.subagent_role = data.subagent_role
+          }
+          if (data.stage === 'subagent_assigned') {
+            addLog(`🤖 ${sec.section_title} -> 分派专家: 【${data.subagent_title}】`)
+          }
           if (data.stage === 'retrieving') sec.status = 'retrieving'
           else if (data.stage === 'retrieved') sec.status = 'retrieved'
           else if (data.stage === 'writing') sec.status = 'writing'
@@ -693,6 +728,10 @@ async function startPipeline() {
               renderMermaidDiagrams()
             })
           }
+        }
+      } else if (data.type === 'telemetry_update') {
+        if (data.summary) {
+          telemetrySummary.value = data.summary
         }
       } else if (data.type === 'section_chunk') {
         const sec = sections.value.find(s => s.id === data.section_id)
@@ -816,6 +855,7 @@ function getSectionStatusText(status: string) {
 
 onMounted(() => {
   fetchTables()
+  fetchBalance()
 })
 </script>
 

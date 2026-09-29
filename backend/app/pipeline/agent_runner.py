@@ -111,7 +111,7 @@ class PiAgentRunner:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "你是一名严谨的高等教育数据分析专家与战略研报主笔。你必须严格依据给定的数据事实撰写，绝不编造，且所有数字必须严格标注 [数值][^cell_id] 溯源标记。"
+                        "content": f"你是一名严谨的高等教育数据分析专家，当前担任【{subagent.title}】（{subagent.role_name}）。你必须严格依据给定的数据事实撰写，绝不编造，且所有数字必须严格标注 [数值][^cell_id] 溯源标记。"
                     },
                     {"role": "user", "content": prompt}
                 ],
@@ -141,7 +141,10 @@ class PiAgentRunner:
                                             yield {"type": "chunk", "text": delta}
                                     except Exception:
                                         continue
-                            yield {"type": "done", "full_content": accumulated_text}
+                            repaired = StructuredOutputEnforcer.validate_and_repair(
+                                accumulated_text, section_title, [c.get("cell_id", "") for c in cell_mappings]
+                            )
+                            yield {"type": "done", "full_content": repaired["repaired_text"]}
                             return
                         else:
                             resp_text = await resp.aread()
