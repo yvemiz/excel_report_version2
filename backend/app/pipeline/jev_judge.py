@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import httpx
 from app.config import settings
 
@@ -113,4 +113,115 @@ class JevJudge:
             "approved": (score >= 0.85 and is_clean),
             "rejection_reason": "；".join(reasons) if reasons else "",
             "provider": "jev-deterministic-rules"
+        }
+
+    async def evaluate_outline(
+        self,
+        outline: List[Dict[str, Any]],
+        catalog: List[Dict[str, Any]],
+        school_name: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Stage 1 Jev 大纲质量把关与合规审判
+        评估维度：
+        1. 覆盖度 (Coverage): 是否全面覆盖高校教育评估核心要素
+        2. 绑定合理性 (Binding Rationality): 各小节绑定的表格是否精准切题
+        3. 粒度合理性 (Granularity): 章节深度与数据量是否匹配
+        """
+        if not self.api_key or self.api_key.startswith("your_"):
+            return self._local_outline_evaluation(outline, catalog, school_name)
+
+        outline_summary = [
+            {
+                "id": s.get("id"),
+                "chapter_title": s.get("chapter_title"),
+                "section_title": s.get("section_title"),
+                "bound_tables": s.get("bound_tables", [s.get("table_name")]),
+                "bound_files": s.get("bound_files", [s.get("file_name")]),
+                "chart": bool(s.get("chart_plan"))
+            }
+            for s in outline
+        ]
+
+        prompt = f"""你是一名严苛的高等教育质量常态监测评估大纲质检裁判（Jev Judge）。
+请对为高校【{school_name or '普通高等学校'}】规划的报告大纲进行合规性、表绑定合理性与结构自适应粒度把关：
+
+# 已规划大纲结构：
+{json.dumps(outline_summary, ensure_ascii=False, indent=2)[:5000]}
+
+# 数据湖表格总数：{len(catalog)} 个
+
+请返回严格合法的 JSON 对象：
+{{
+  "structure_score": 0.95, // 0.0 - 1.0 的连续评分，结构严谨性与覆盖度
+  "is_approved": true, // 是否批准放行进入正文撰写 (>= 0.85 且无重大缺陷为 true)
+  "has_unbound_sections": false, // 是否存在脱离数据湖的空想小节
+  "critique": "" // 若未通过给出具体整改建议，通过则给出精炼简评
+}}"""
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "你是一名精通高校评估公文体系的 Jev 质检裁判模型。严格输出 JSON。"},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"}
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                resp = await client.post(f"{self.base_url.rstrip('/')}/chat/completions", json=payload, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    res = json.loads(data["choices"][0]["message"]["content"])
+                    score = float(res.get("structure_score", 0.92))
+                    approved = bool(res.get("is_approved", score >= 0.85))
+                    return {
+                        "structure_score": score,
+                        "is_approved": approved,
+                        "critique": res.get("critique", "大纲架构符合教育部常态监测公文规范"),
+                        "provider": "deepseek-jev-outline"
+                    }
+        except Exception:
+            pass
+
+        return self._local_outline_evaluation(outline, catalog, school_name)
+
+    def _local_outline_evaluation(
+        self,
+        outline: List[Dict[str, Any]],
+        catalog: List[Dict[str, Any]],
+        school_name: str = ""
+    ) -> Dict[str, Any]:
+        """本地启发式大纲规则断言"""
+        score = 0.96
+        critiques = []
+
+        if len(outline) < 3:
+            score -= 0.3
+            critiques.append("大纲章节偏少，未能充分体现办学多维发展特征")
+
+        # 检查是否有未绑定数据表的小节
+        catalog_tables = {c["table_name"] for c in catalog}
+        unbound_cnt = 0
+        for s in outline:
+            b_tables = s.get("bound_tables") or ([s.get("table_name")] if s.get("table_name") else [])
+            if not b_tables or not any(bt in catalog_tables for bt in b_tables):
+                unbound_cnt += 1
+
+        if catalog and unbound_cnt > len(outline) * 0.3:
+            score -= 0.25
+            critiques.append(f"存在 {unbound_cnt} 个小节未精准锚定底层物理表格")
+
+        score = max(0.1, min(1.0, round(score, 2)))
+        return {
+            "structure_score": score,
+            "is_approved": score >= 0.85,
+            "critique": "；".join(critiques) if critiques else "大纲覆盖全面，数据表绑定清晰，分节粒度自适应良好",
+            "provider": "jev-deterministic-outline"
         }

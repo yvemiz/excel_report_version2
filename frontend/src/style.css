@@ -139,6 +139,43 @@ button {
   color: var(--accent-gold);
   border: 1px solid #fde68a;
 }
+.badge-gray {
+  background-color: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #cbd5e1;
+}
+
+/* 顶栏评估高校输入框 */
+.school-input-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background-color: #f8fafc;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 3px 8px;
+  transition: all 0.2s ease;
+}
+.school-input-box:focus-within {
+  border-color: var(--primary-navy);
+  box-shadow: 0 0 0 2px rgba(30, 61, 89, 0.15);
+  background-color: #ffffff;
+}
+.school-badge {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--primary-navy);
+  white-space: nowrap;
+}
+.school-input {
+  border: none;
+  background: transparent;
+  outline: none;
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  width: 135px;
+}
 
 /* 溯源高亮数字 */
 .lake-citation {

@@ -79,6 +79,10 @@ backend/data/uploads/*
 backend/data/exports/*
 !backend/data/exports/.gitkeep
 
+# 运行过程中的断点暂存文件
+backend/data/checkpoints/*
+!backend/data/checkpoints/.gitkeep
+
 # 动态生成的统计图表图片（保留 .gitkeep）
 backend/static/charts/*
 !backend/static/charts/.gitkeep

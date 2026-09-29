@@ -1,6 +1,7 @@
 import os
 import shutil
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from app.config import settings
 from app.core.stc_parser import STCParser
@@ -68,6 +69,7 @@ async def load_example_data():
         raise HTTPException(status_code=404, detail="example 目录不存在")
 
     cell_lake_instance.clear()
+    duckdb_instance.clear()
     loaded = []
     total_cells = 0
 
@@ -97,10 +99,13 @@ async def load_example_data():
 
 @router.get("/tables")
 async def get_tables():
-    """获取 DuckDB 目录层与数据指标列表"""
+    """获取 DuckDB 目录层与数据指标列表及嗅探到的学校元数据"""
+    school_meta = cell_lake_instance.detect_school_metadata()
     return {
         "catalog": duckdb_instance.get_catalog(),
-        "total_cells": cell_lake_instance.count()
+        "total_cells": cell_lake_instance.count(),
+        "school_metadata": school_meta,
+        "school_name": school_meta.get("school_name", "")
     }
 
 @router.get("/cell/{cell_id}")
@@ -112,4 +117,54 @@ async def get_cell_detail(cell_id: str):
     return {
         "success": True,
         "cell": cell
+    }
+
+class ScanDirectoryRequest(BaseModel):
+    directory_path: str
+    recursive: bool = True
+    clear_existing: bool = True
+
+@router.post("/scan_directory")
+async def scan_directory_data(req: ScanDirectoryRequest):
+    """
+    极速扫描并摄入指定本地目录中的大量 Excel 报表（可承载 500+ 个文件）
+    避免浏览器 HTTP 单次上传大批量文件导致的连接数耗尽或网络超时
+    """
+    dir_path = req.directory_path.strip()
+    if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
+        raise HTTPException(status_code=400, detail=f"指定的目录不存在或不是文件夹: {dir_path}")
+
+    if req.clear_existing:
+        cell_lake_instance.clear()
+        duckdb_instance.clear()
+
+    parsed_sheets = STCParser.parse_directory(dir_path, recursive=req.recursive)
+    if not parsed_sheets:
+        return {"success": False, "message": "该目录下未扫描到任何 .xls 或 .xlsx 文件", "total_files": 0}
+
+    loaded_summary = []
+    all_cells_flat = []
+
+    for ps in parsed_sheets:
+        tbl = duckdb_instance.register_sheet(ps["sheet_name"], ps["file_name"], ps["rows"], ps["header_paths"])
+        all_cells_flat.extend(ps["cells"])
+        loaded_summary.append({
+            "file_name": ps["file_name"],
+            "sheet_name": ps["sheet_name"],
+            "row_count": ps["row_count"],
+            "cells_count": len(ps["cells"]),
+            "table_name": tbl,
+            "headers": ps["header_paths"][:8]
+        })
+
+    total_cells = cell_lake_instance.insert_cells(all_cells_flat, batch_size=5000)
+    detected_school = cell_lake_instance.detect_school_metadata()
+
+    return {
+        "success": True,
+        "message": f"成功批量扫描并入库 {len(loaded_summary)} 个工作表，共计 {total_cells} 个单元格物理坐标进入 Cell Lake",
+        "sheets_count": len(loaded_summary),
+        "total_cells": cell_lake_instance.count(),
+        "school_metadata": detected_school,
+        "school_name": detected_school.get("school_name", "")
     }

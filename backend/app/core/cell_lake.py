@@ -14,8 +14,14 @@ class CellLake:
         self._init_schema()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode = WAL;")
+            conn.execute("PRAGMA synchronous = NORMAL;")
+            conn.execute("PRAGMA cache_size = -64000;")
+        except Exception:
+            pass
         return conn
 
     def _init_schema(self):
@@ -45,21 +51,25 @@ class CellLake:
             conn.cursor().execute("DELETE FROM cell_lake;")
             conn.commit()
 
-    def insert_cells(self, cells: List[Dict[str, Any]]) -> int:
-        """批量写入单元格记录"""
+    def insert_cells(self, cells: List[Dict[str, Any]], batch_size: int = 5000) -> int:
+        """批量写入单元格记录（支持海量数据极速分块事务提交）"""
         if not cells:
             return 0
+        total_inserted = 0
         with self._get_conn() as conn:
             cursor = conn.cursor()
-            cursor.executemany("""
-            INSERT OR REPLACE INTO cell_lake (
-                cell_id, file_name, sheet_name, row_idx, col_idx, cell_ref, metric_path, raw_value, numeric_value
-            ) VALUES (
-                :cell_id, :file_name, :sheet_name, :row_idx, :col_idx, :cell_ref, :metric_path, :raw_value, :numeric_value
-            );
-            """, cells)
+            for i in range(0, len(cells), batch_size):
+                chunk = cells[i:i + batch_size]
+                cursor.executemany("""
+                INSERT OR REPLACE INTO cell_lake (
+                    cell_id, file_name, sheet_name, row_idx, col_idx, cell_ref, metric_path, raw_value, numeric_value
+                ) VALUES (
+                    :cell_id, :file_name, :sheet_name, :row_idx, :col_idx, :cell_ref, :metric_path, :raw_value, :numeric_value
+                );
+                """, chunk)
+                total_inserted += len(chunk)
             conn.commit()
-        return len(cells)
+        return total_inserted
 
     def get_cell(self, cell_id: str) -> Optional[Dict[str, Any]]:
         """根据 cell_id 查询单个单元格明细"""
@@ -135,5 +145,61 @@ class CellLake:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM cell_lake")
             return cursor.fetchone()[0]
+
+    def detect_school_metadata(self) -> Dict[str, str]:
+        """从入库的单元格中自动探测学校元数据 (校名、代码、性质、类型等)"""
+        meta = {
+            "school_name": "",
+            "school_code": "",
+            "school_nature": "",
+            "school_type": ""
+        }
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            # 1. 尝试直接按 metric_path 查找“学校名称”
+            cursor.execute("""
+            SELECT raw_value FROM cell_lake 
+            WHERE (metric_path LIKE '%学校名称%' OR metric_path LIKE '%高校名称%')
+              AND raw_value != '' AND raw_value NOT LIKE '%指标%'
+            LIMIT 1
+            """)
+            row = cursor.fetchone()
+            if row and row["raw_value"] and len(row["raw_value"].strip()) >= 3:
+                meta["school_name"] = row["raw_value"].strip()
+
+            # 2. 尝试查找院校代码
+            cursor.execute("""
+            SELECT raw_value FROM cell_lake 
+            WHERE (metric_path LIKE '%代码%' OR metric_path LIKE '%标识码%')
+              AND raw_value != ''
+            LIMIT 1
+            """)
+            row = cursor.fetchone()
+            if row and row["raw_value"]:
+                meta["school_code"] = row["raw_value"].strip()
+
+            # 3. 尝试查找办学类型
+            cursor.execute("""
+            SELECT raw_value FROM cell_lake 
+            WHERE (metric_path LIKE '%办学类型%' OR metric_path LIKE '%学校类型%')
+              AND raw_value != ''
+            LIMIT 1
+            """)
+            row = cursor.fetchone()
+            if row and row["raw_value"]:
+                meta["school_type"] = row["raw_value"].strip()
+
+            # 4. 尝试查找学校性质
+            cursor.execute("""
+            SELECT raw_value FROM cell_lake 
+            WHERE (metric_path LIKE '%学校性质%' OR metric_path LIKE '%办学性质%')
+              AND raw_value != ''
+            LIMIT 1
+            """)
+            row = cursor.fetchone()
+            if row and row["raw_value"]:
+                meta["school_nature"] = row["raw_value"].strip()
+
+        return meta
 
 

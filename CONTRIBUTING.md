@@ -1,15 +1,16 @@
-# 团队协作开发指南与规范 (Contributing Guide)
+# 团队协作开发指南与规范 (Contributing Guide v2.2)
 
 欢迎参与本项目开发！为了保证代码质量与版本库干净稳定，请所有开发同学严格遵守本规范。
 
 ---
 
-## 🚫 新手开发“四大禁令”（绝对红线）
+## 🚫 新手开发“五大禁令”（绝对红线）
 
 1. **绝对禁止直接在 `main` / `master` 分支写代码并提交**。
 2. **绝对禁止使用 `git push --force` 或 `-f` 强推覆盖代码**。
-3. **绝对禁止将任何真实密钥（如 `sk-...` API Key）或私人密码写入代码文件**。
-4. **绝对禁止向 Git 提交 `.env`、`node_modules/`、`__pycache__/`、`*.db` 等缓存或数据库文件**。
+3. **绝对禁止将任何真实密钥（如 `sk-...` API Key）写入代码或配置文件**。
+4. **绝对禁止向 Git 提交 `.env`、`node_modules/`、`backend/data/*.db`、`backend/data/*.duckdb`、`backend/data/exports/*` 等缓存或数据库文件**。
+5. **绝对禁止将 Windows 批处理脚本（`.bat`）保存为 Unix LF 换行或 UTF-8 编码**：Windows `cmd.exe` 要求批处理文件必须使用 **CRLF (`\r\n`)** 换行符与 **ANSI / GBK** 编码，否则会导致命令粘连与乱码。
 
 ---
 
@@ -47,7 +48,7 @@
              / 不合规打回                   \ 审核批准
             ▼                               ▼
 ┌─────────────────────────┐   ┌──────────────────────────┐
-│   新手本地修改后 push    │   │  点击 Squash and merge   │
+│   本地修改后继续 push    │   │  点击 Squash and merge   │
 │   PR 页面将自动同步更新  │   │  压缩合并入 master 分支  │
 └─────────────────────────┘   └─────────────┬────────────┘
                                             │
@@ -58,7 +59,6 @@
 ```
 
 ### 第一步：同步最新代码并创建个人功能分支
-
 
 每次准备写新功能或修 Bug 前，先拉取主干最新进度，然后切出新分支：
 
@@ -75,8 +75,9 @@ git checkout -b feature/upload-excel-zhangsan
 
 ### 第二步：在个人分支上进行本地开发与调试
 
-- 后端开发：在 `backend/` 目录下调试，新增依赖请同步记录到 `requirements.txt`。
-- 前端开发：在 `frontend/` 目录下调试，新增依赖请同步记录到 `package.json`。
+- **Python 后端开发**：运行环境为 Python 3.12（端口 `8008`），新增依赖请同步记录到 `backend/requirements.txt`。
+- **前端开发**：运行环境为 Node.js 20+ / 22+（端口 `5173`），新增依赖请同步记录到 `frontend/package.json`。
+- **Pi-Agent 侧车开发**：位于 `pi-main/pi_agent_sidecar.mjs`，请保持原生 ES Module 零外部依赖设计。
 
 ### 第三步：提交前自检并推送到远端
 
@@ -89,8 +90,8 @@ git status
 # 2. 仅添加你需要提交的代码文件（不要无脑 git add .）
 git add backend/app/xxx.py frontend/src/xxx.vue
 
-# 3. 提交说明请清晰明了
-git commit -m "feat: 新增Excel多表头自适应解析功能"
+# 3. 提交说明请遵循统一规范 (feat:, fix:, docs:, refactor:)
+git commit -m "feat: 完善 .xlsx 复合表头跨行跨列解析逻辑"
 
 # 4. 推送到远端自己的分支
 git push origin feature/upload-excel-zhangsan
@@ -98,17 +99,29 @@ git push origin feature/upload-excel-zhangsan
 
 ### 第四步：在 GitHub 网页上发起 Pull Request (PR)
 
-1. 打开 GitHub 仓库页面，点击 **“Compare & pull request”** 按钮。
-2. 目标分支选择 `base: master`，源分支选择 `compare: feature/upload-excel-zhangsan`。
-3. 详细填写 PR 说明：修改了什么、如何测试验证、是否有未完成事项。
-4. 提交 PR 后，等待 **GitHub Actions 自动化检查** 全部变绿（通过）。
-5. 联系项目负责人进行 **Code Review**，审核通过后由负责人统一合并。
+1. 打开 GitHub 仓库页面，点击黄色提示条的 **Compare & pull request** 按钮；
+2. 填写清晰的修改描述（解决了什么问题，改动了哪些模块）；
+3. 等待 CI 自动化流水线（Lint、测试、构建）全部通过；
+4. 邀请 Reviewer 审查代码，通过后由负责人使用 **Squash and merge** 压缩合并入主干。
 
 ---
 
-## 💡 常见问题与踩坑提醒
+## 🧪 本地测试验证命令清单
 
-- **Q: 误将 `.env` 或数据库文件加进去了怎么办？**
-  - 在未 push 前，执行 `git rm --cached <文件名>`，撤销暂存区追踪。
-- **Q: 提示有分支冲突（Conflict）无法合并？**
-  - 切回个人分支，执行 `git fetch origin master` 并 `git merge origin/master`，在 VS Code 中逐处比对保留正确内容，重新 commit 并 push 即可。
+提交代码前请在本地执行完整测试以确保无回归故障：
+
+```bash
+# 1. 运行核心算法与大纲生成单元测试
+cd backend
+python -m unittest test_core.py test_dynamic_outline.py test_xlsx_and_custom_school.py
+
+# 2. 运行 Pi-Agent 跨语言 IPC 桥接测试
+python test_pi_bridge.py
+
+# 3. 运行端到端 5 阶段流水线测试
+python test_e2e_pipeline.py
+
+# 4. 前端类型检查与生产构建测试
+cd ../frontend
+npm run build
+```
