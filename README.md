@@ -1,8 +1,9 @@
-# 高校发展检验报告智能生成系统 (Pi-Agent 工业级流水线版 v2.0)
+# 高校发展检验报告智能生成系统 (Pi-Agent 工业级流水线版 v2.1)
 
 > **基座引擎**：Pi-Agent (`pi-main`) + Python 数据工程微服务 (`excel_report_env`)  
 > **核心架构**：确定性分阶段流水线（Deterministic Staged Pipeline）+ 单 Pi-Agent 核心撰写节点 + Jev 极速判定  
-> **交付形态**：白色学术教务风格 Multi-Panel Studio 前端（Vue 3）+ 100% 穿透溯源数据湖（Cell Lake）
+> **交付形态**：白色学术教务风格 Multi-Panel Studio 前端（Vue 3）+ 100% 穿透溯源数据湖（Cell Lake）  
+> **生成模式**：**表格数据驱动的动态大纲**（用户上传任意 Excel，自动推导章节与自适应图表）
 
 ---
 
@@ -10,6 +11,7 @@
 
 1. **单 Agent 确定性流水线 (0 死循环、0 幻觉)**：
    - 彻底摒弃多 Agent 自由对话协商缺陷，采用 5 阶段状态机（Stage 1 规划 -> Stage 2 检索 -> Stage 3 撰写 -> Stage 4 质检 -> Stage 5 汇编）。
+   - **数据驱动动态大纲**：Stage 1 自动扫描 DuckDB Catalog 与复合表头，根据用户上传的任意 Excel 报表动态生长对应章节；支持自适应推荐折线图、柱状图或环形图，并由 DuckDB 查询真实数值。
    - 数据检索阶段坚决由 Python/DuckDB 参数化执行，实现 **0 Token 消耗、毫秒级响应、100% 真实**。
 
 2. **穿透式数据审计湖 (Cell Lake)**：
@@ -32,45 +34,64 @@
 
 ---
 
-## 📁 目录结构
+## 📁 完整项目目录结构
 
-```
+```text
 excel_report/
-├── backend/                        # FastAPI 后端服务
+├── .github/
+│   └── workflows/
+│       └── ci.yml                  # GitHub Actions CI 自动化语法与构建检测流水线
+├── .env.example                    # 环境变量配置示例模板 (不含敏感 Key)
+├── .gitignore                      # 工业级 Git 忽略配置 (隔离密钥、数据库与依赖)
+├── CONTRIBUTING.md                 # 团队协作与分支合并规范指引 (新开发者必读)
+├── README.md                       # 项目总体介绍与运行使用指南 (本文档)
+├── SYSTEM_WORKFLOW.md              # 全流程技术实现与业务流转说明书
+├── excel_report_agent_system_architecture.md # 系统总体架构设计白皮书
+├── backend/                        # FastAPI 后端服务工程
+│   ├── requirements.txt            # Python 核心依赖清单 (Python 3.12)
+│   ├── test_core.py                # 底座核心模块 (STC/CellLake/DuckDB) 单元测试
+│   ├── test_dynamic_outline.py     # 数据驱动动态大纲与自适应图表推导测试
+│   ├── test_e2e_pipeline.py        # 端到端 5 阶段全自动化流水线集成测试
 │   ├── app/
-│   │   ├── config.py               # 项目与模型服务配置
-│   │   ├── main.py                 # FastAPI 入口与 CORS/静态目录挂载
-│   │   ├── core/
-│   │   │   ├── stc_parser.py       # STC 复合表头结构感知解析器 (支持 .xls / .xlsx)
-│   │   │   ├── cell_lake.py        # SQLite 单元格溯源湖 (Cell Lake)
-│   │   │   ├── duckdb_engine.py    # DuckDB 列式指标分析与聚合引擎
-│   │   │   ├── chart_service.py    # Matplotlib 高清学术统计图表生成器
-│   │   │   ├── audit_service.py    # 正则反查与 100% 穿透断言服务
-│   │   │   ├── docx_exporter.py    # 学术规范 Word (.docx) 导出器
-│   │   │   └── excel_exporter.py   # 数据穿透对账总表 (.xlsx) 导出器
-│   │   ├── pipeline/
-│   │   │   ├── stages.py           # 5阶段确定性流水线调度器
-│   │   │   ├── agent_runner.py     # Pi-Agent 核心撰写节点 (DeepSeek/确定性合成)
+│   │   ├── config.py               # 项目路径与模型服务环境变量配置
+│   │   ├── main.py                 # FastAPI 服务入口与静态/CORS 路由挂载
+│   │   ├── core/                   # 数据工程与穿透审计底座核心模块
+│   │   │   ├── stc_parser.py       # STC 复合表头结构感知解析器 (.xls / .xlsx)
+│   │   │   ├── cell_lake.py        # SQLite 单元格溯源湖 (Cell Lake 物理坐标存底)
+│   │   │   ├── duckdb_engine.py    # DuckDB 列式指标分析引擎 (0 Token 参数化计算)
+│   │   │   ├── chart_service.py    # Matplotlib 300DPI 学术统计图表渲染引擎
+│   │   │   ├── audit_service.py    # 正则反查与 100% 单元格坐标穿透断言服务
+│   │   │   ├── docx_exporter.py    # 学术规范 Word (.docx) 图文研报导出器
+│   │   │   └── excel_exporter.py   # 数据穿透对账总表 (.xlsx) 双表导出器
+│   │   ├── pipeline/               # 确定性 5 阶段调度核心
+│   │   │   ├── stages.py           # 5 阶段流水线调度器 (含动态大纲与自适应图表)
+│   │   │   ├── agent_runner.py     # 单 Pi-Agent 核心学术研报撰写节点 (流式/确定性)
 │   │   │   └── jev_judge.py        # Jev 极速质量决策与逻辑打分器
-│   │   └── api/
-│   │       ├── routes_upload.py    # 文件上传、STC解析与示例数据加载 API
-│   │       ├── routes_pipeline.py  # 流水线执行与 WebSocket 流式推送
-│   │       └── routes_export.py    # Word 报告与 Excel 对账表下载 API
-│   ├── static/charts/              # 生成的高清图表存储
-│   ├── data/exports/               # 导出的 Word 与 Excel 文件
-│   ├── test_core.py                # 底座核心模块测试
-│   └── test_e2e_pipeline.py        # 端到端全自动化流水线集成测试
-├── frontend/                       # Vue 3 前端工程 (Vite + Vue 3 + Pinia)
-│   ├── src/
-│   │   ├── App.vue                 # Multi-Panel Studio 主工作台
-│   │   ├── style.css               # 白色教务公文规范设计系统
-│   │   └── main.ts
-│   └── vite.config.ts              # API 代理与构建配置
-├── example/                        # 8 份高校真实状态评估报表 (.xls)
-├── pi-main/                        # Pi-Agent 基座源码
-├── run_backend.bat                 # 后端一键启动脚本 (端口 8000)
-├── run_frontend.bat                # 前端一键启动脚本 (端口 5173)
-└── start_all.bat                   # 前后端双服务一键联动启动脚本
+│   │   └── api/                    # RESTful & WebSocket API 路由
+│   │       ├── routes_upload.py    # 文件上传、STC 解析与示例数据载入 API
+│   │       ├── routes_pipeline.py  # 流水线执行与 WebSocket / SSE 流式推送 API
+│   │       └── routes_export.py    # Word 研报与 Excel 穿透对账表下载 API
+│   ├── data/                       # 本地数据存储与导出目录 (已由 .gitignore 隔离)
+│   │   ├── cell_lake.db            # SQLite 单元格湖数据库文件
+│   │   ├── metrics.duckdb          # DuckDB 列式指标存储数据库文件
+│   │   ├── exports/                # 动态生成的 Word 与 Excel 成果物下载目录
+│   │   └── uploads/                # 临时上传的原始 Excel 文件目录
+│   └── static/charts/              # 动态生成的 300DPI 学术矢量统计图表存储目录
+├── frontend/                       # Vue 3 前端工程 (Vite + TypeScript + Pinia)
+│   ├── package.json                # 前端依赖配置
+│   ├── tsconfig.json               # TypeScript 配置文件
+│   ├── vite.config.ts              # Vite 代理与工程构建配置
+│   ├── index.html                  # 单页面应用入口
+│   └── src/
+│       ├── App.vue                 # 白色教务公文风 Multi-Panel Studio 主工作台
+│       ├── style.css               # 学术公文规范排版设计系统
+│       └── main.ts                 # Vue 应用初始化入口
+├── example/                        # 8 份高校真实本科教学状态评估报表 (.xls)
+├── pi-main/                        # Pi-Agent 底座源码及插件套件
+├── run_backend.bat                 # 后端一键启动脚本 (端口 8000，GBK 编码)
+├── run_frontend.bat                # 前端一键启动脚本 (端口 5173，GBK 编码)
+├── start_all.bat                   # 前后端双服务一键联动启动脚本 (GBK 编码)
+└── start_all.ps1                   # PowerShell 跨平台双服务启动脚本
 ```
 
 ---
@@ -145,4 +166,3 @@ git push origin feature/功能名称-你的姓名拼音
 * **一键启动**：日常开发双击根目录的 `start_all.bat` 即可同时启动前后端。
 
 > 📘 完整的开发准则、冲突解决与提交流程，请参阅根目录专属指南：[**`CONTRIBUTING.md`**](file:///d:/vs_project/excel_report/CONTRIBUTING.md)。
-
