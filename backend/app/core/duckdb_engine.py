@@ -16,6 +16,28 @@ class DuckDBEngine:
             os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self.conn = duckdb.connect(self.db_path)
         self.registered_tables: Dict[str, Dict[str, Any]] = {}
+        self._sync_existing_tables()
+
+    def _sync_existing_tables(self):
+        """若使用持久化数据库，自动同步已存在的表元数据"""
+        try:
+            tables = [r[0] for r in self.conn.execute("SHOW TABLES").fetchall()]
+            for tbl in tables:
+                if tbl not in self.registered_tables:
+                    desc = self.conn.execute(f"DESCRIBE {tbl}").fetchall()
+                    cols = [d[0] for d in desc]
+                    row_cnt = self.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                    # 从表名还原粗略的文件与工作表信息
+                    clean_name = tbl.replace("tbl_", "")
+                    self.registered_tables[tbl] = {
+                        "table_name": tbl,
+                        "sheet_name": clean_name,
+                        "file_name": clean_name,
+                        "row_count": row_cnt,
+                        "columns": cols
+                    }
+        except Exception:
+            pass
 
     def _sanitize_table_name(self, name: str) -> str:
         """格式化表名，移除非法字符"""

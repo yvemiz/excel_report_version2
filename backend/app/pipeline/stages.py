@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 from typing import Dict, Any, List, Callable, Optional, AsyncGenerator
 from app.core.cell_lake import CellLake
@@ -9,6 +10,8 @@ from app.core.docx_exporter import DocxExporter
 from app.core.excel_exporter import ExcelExporter
 from app.pipeline.agent_runner import PiAgentRunner
 from app.pipeline.jev_judge import JevJudge
+
+CN_NUMS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二", "十三", "十四", "十五"]
 
 class ReportPipeline:
     """
@@ -39,7 +42,7 @@ class ReportPipeline:
         # 流水线全局状态
         self.current_stage = 0
         self.stages_info = [
-            {"id": 1, "name": "Stage 1: 规划阶段", "desc": "规范大纲生成与指标粗目录映射", "status": "pending"},
+            {"id": 1, "name": "Stage 1: 规划阶段", "desc": "数据驱动动态大纲与自适应图表推荐", "status": "pending"},
             {"id": 2, "name": "Stage 2: 检索阶段", "desc": "DuckDB 参数化提取与 Cell Lake 坐标绑定 (0 Token)", "status": "pending"},
             {"id": 3, "name": "Stage 3: 撰写阶段", "desc": "Pi-Agent 核心学术研报流式生成与图表内嵌", "status": "pending"},
             {"id": 4, "name": "Stage 4: 质检阶段", "desc": "Cell Lake 物理坐标 100% 反查与 Jev 极速判定", "status": "pending"},
@@ -50,16 +53,242 @@ class ReportPipeline:
         self.export_files: Dict[str, str] = {}
 
     def plan_outline(self) -> List[Dict[str, Any]]:
-        """Stage 1: 规划阶段 - 生成标准学术研报结构大纲"""
+        """
+        Stage 1: 规划阶段 - 数据驱动的动态大纲规划器
+        根据 DuckDB 与 Cell Lake 实际扫描到的表格、工作表与表头参数，
+        自动进行主题聚类与动态章节生成，并自适应绑定推荐图表与真实数据。
+        """
         catalog = self.duckdb_engine.get_catalog()
-        school_name = "海南师范大学"
         
-        # 尝试从表1-1获取真实学校名称
-        overview_cell = self.cell_lake.search_cells_by_keyword("海南师范大学")
-        if overview_cell:
-            school_name = overview_cell[0]["raw_value"]
+        # 1. 若内存 catalog 为空，尝试从 CellLake 反查已入库的表格元数据
+        if not catalog:
+            cell_tables = self.cell_lake.get_tables_summary()
+            if cell_tables:
+                catalog = [
+                    {
+                        "table_name": f"tbl_{t['file_name']}",
+                        "file_name": t["file_name"],
+                        "sheet_name": t["sheet_name"],
+                        "row_count": t["cell_count"],
+                        "columns": []
+                    }
+                    for t in cell_tables
+                ]
 
-        sections = [
+        # 2. 若依然无任何数据，提供标准安全兜底模板
+        if not catalog:
+            sections = self._get_fallback_outline()
+            self.sections_plan = sections
+            return sections
+
+        # 3. 动态聚类并自适应生成章节规划
+        sections = self._generate_dynamic_sections(catalog)
+        self.sections_plan = sections
+        return sections
+
+    def _generate_dynamic_sections(self, catalog: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """基于已加载表格参数，动态规划章节与自适应图表"""
+        THEME_DEFINITIONS = [
+            {
+                "key": "overview",
+                "patterns": ["概况", "办学", "基本情况", "1_1", "1-1"],
+                "chapter_title": "学校概况与办学定位",
+                "section_title": "办学历史与中长期发展战略定位",
+                "objective": "客观阐述学校基础办学性质、办学规模与中长期发展战略规划定位",
+                "default_chart_type": None
+            },
+            {
+                "key": "organization",
+                "patterns": ["机构", "党政", "单位", "师资", "教师", "队伍", "1_2", "1_3", "1-2", "1-3"],
+                "chapter_title": "组织机构与师资科研支撑体系",
+                "section_title": "教学科研单位与党政管理支撑体系分布",
+                "objective": "系统梳理全校党政管理职能部门与各教学科研学院的构架分布及组织效能",
+                "default_chart_type": "pie"
+            },
+            {
+                "key": "majors",
+                "patterns": ["专业", "专业基本", "专业大类", "培养", "1_4", "1-4"],
+                "chapter_title": "专业设置与大类培养布局",
+                "section_title": "本科专业结构与学科门类覆盖分析",
+                "objective": "深入分析各学院设置本科专业的分布形态、学制年限及师范类专业结构占比",
+                "default_chart_type": "bar"
+            },
+            {
+                "key": "disciplines",
+                "patterns": ["学科", "学位点", "博士", "硕士", "流动站", "4_1", "4-1"],
+                "chapter_title": "学科建设与高层次学位点发展",
+                "section_title": "博士后流动站与博硕士学位授权点布局",
+                "objective": "全面论述全校博士后科研流动站、一级博士点、硕士专业学位授权点的层级结构",
+                "default_chart_type": "column"
+            },
+            {
+                "key": "first_class",
+                "patterns": ["一流", "优势", "重点", "建设点", "4_3", "4-3"],
+                "chapter_title": "优势一流专业建设成效与示范引领",
+                "section_title": "国家级与省级一流本科专业建设成效分析",
+                "objective": "分析国家级与省级一流本科专业建设点的获批年度演进与特色示范效应",
+                "default_chart_type": "line"
+            }
+        ]
+
+        assigned_tables = set()
+        sections = []
+        theme_index = 0
+
+        # 首先尝试命中标准评估公文模式
+        for t_def in THEME_DEFINITIONS:
+            matched_tables = []
+            for item in catalog:
+                t_name = item.get("table_name", "")
+                f_name = item.get("file_name", "")
+                s_name = item.get("sheet_name", "")
+                full_text = f"{t_name}_{f_name}_{s_name}".lower()
+                if any(p.lower() in full_text for p in t_def["patterns"]):
+                    matched_tables.append(item)
+                    assigned_tables.add(item["table_name"])
+
+            if matched_tables:
+                theme_index += 1
+                cn_num = CN_NUMS[theme_index - 1] if theme_index <= len(CN_NUMS) else str(theme_index)
+                primary_table = matched_tables[0]
+                
+                chart_plan = self._auto_recommend_chart(
+                    primary_table["table_name"], 
+                    primary_table.get("columns", []), 
+                    t_def["default_chart_type"],
+                    matched_tables
+                )
+
+                sections.append({
+                    "id": f"sec_{theme_index}",
+                    "chapter_title": f"第{cn_num}章 {t_def['chapter_title']}",
+                    "section_title": f"{theme_index}.1 {t_def['section_title']}",
+                    "objective": t_def["objective"],
+                    "table_keyword": primary_table.get("file_name", t_def["patterns"][0]),
+                    "file_name": primary_table.get("file_name", ""),
+                    "sheet_name": primary_table.get("sheet_name", ""),
+                    "table_name": primary_table.get("table_name", ""),
+                    "chart_plan": chart_plan
+                })
+
+        # 对于未能匹配标准模式的任意用户自定义新上传表格，自动动态生长出新章节！
+        for item in catalog:
+            if item["table_name"] not in assigned_tables:
+                theme_index += 1
+                cn_num = CN_NUMS[theme_index - 1] if theme_index <= len(CN_NUMS) else str(theme_index)
+                
+                raw_fn = os.path.splitext(item.get("file_name", ""))[0]
+                clean_name = re.sub(r'^表[\d\-_.]*\s*', '', raw_fn)
+                clean_name = re.sub(r'^\d+[\-_.]\d+[\-_.]?\d*\s*', '', clean_name)
+                clean_name = clean_name.replace("数据", "").replace("情况", "").strip()
+                if not clean_name:
+                    clean_name = item.get("sheet_name", f"指标数据_{theme_index}")
+
+                chart_plan = self._auto_recommend_chart(
+                    item["table_name"], 
+                    item.get("columns", []), 
+                    None,
+                    [item]
+                )
+
+                sections.append({
+                    "id": f"sec_{theme_index}",
+                    "chapter_title": f"第{cn_num}章 {clean_name}分析与评价",
+                    "section_title": f"{theme_index}.1 {clean_name}核心指标与演进态势",
+                    "objective": f"基于{item.get('file_name', '上传报表')}深入分析{clean_name}的关键指标演进、结构分布与综合建设成效",
+                    "table_keyword": item.get("file_name", clean_name),
+                    "file_name": item.get("file_name", ""),
+                    "sheet_name": item.get("sheet_name", ""),
+                    "table_name": item.get("table_name", ""),
+                    "chart_plan": chart_plan
+                })
+                assigned_tables.add(item["table_name"])
+
+        return sections if sections else self._get_fallback_outline()
+
+    def _auto_recommend_chart(
+        self, 
+        table_name: str, 
+        columns: List[str], 
+        preferred_type: Optional[str] = None,
+        all_matched_tables: Optional[List[Dict[str, Any]]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """基于 DuckDB 真实数据动态推导并生成自适应学术图表计划"""
+        try:
+            # 1. 机构/单位类别：若存在多个对比表，执行跨表联合分布统计
+            if preferred_type == "pie" and all_matched_tables and len(all_matched_tables) >= 2:
+                labels = []
+                data = []
+                for tbl in all_matched_tables[:4]:
+                    clean_lbl = re.sub(r'^[表\d_\-\.\s]+', '', tbl.get("file_name", ""))
+                    clean_lbl = clean_lbl.replace("学校", "").replace("数据.xls", "").replace(".xls", "").replace("数据.xlsx", "").replace(".xlsx", "")
+                    cnt = tbl.get("row_count", 0)
+                    if cnt > 0:
+                        labels.append(clean_lbl)
+                        data.append(cnt)
+                if len(labels) >= 2:
+                    return {
+                        "type": "pie",
+                        "title": "学校组织管理与教学科研单位构架分布占比",
+                        "labels": labels,
+                        "data": data,
+                        "series_name": "单位数"
+                    }
+
+            if not table_name:
+                return None
+
+            # 2. 探测时间/年份列 -> 生成趋势折线图 (排除“修业年限”等误判)
+            year_col = next((c for c in columns if any(k in c for k in ["年度", "年份", "获批时间", "通过时间", "成立时间", "year", "date"]) and "年限" not in c and "年龄" not in c), None)
+            if (preferred_type == "line" or (not preferred_type and year_col)) and year_col:
+                sql = f"SELECT \"{year_col}\", count(*) as cnt FROM {table_name} WHERE \"{year_col}\" IS NOT NULL AND \"{year_col}\" != '' GROUP BY \"{year_col}\" ORDER BY \"{year_col}\" LIMIT 8"
+                res = self.duckdb_engine.query(sql)
+                if res and len(res) >= 2 and "error" not in res[0]:
+                    lbls = [f"{str(r[year_col])}年" if "年" not in str(r[year_col]) else str(r[year_col]) for r in res]
+                    vals = [int(r["cnt"]) for r in res]
+                    return {
+                        "type": "line",
+                        "title": "关键指标建设与演进年度变化趋势",
+                        "labels": lbls,
+                        "data": vals,
+                        "series_name": "数量",
+                        "y_label": "统计数(个)"
+                    }
+
+            # 3. 探测分类列 -> 生成柱状图或条形图
+            group_col = None
+            for c in columns:
+                if any(k in c for k in ["单位", "学院", "系", "部门", "门类", "类型", "类别", "职称"]):
+                    group_col = c
+                    break
+
+            if not group_col and columns:
+                group_col = columns[0]
+
+            if group_col:
+                sql = f"SELECT \"{group_col}\", count(*) as cnt FROM {table_name} WHERE \"{group_col}\" IS NOT NULL AND \"{group_col}\" != '' GROUP BY \"{group_col}\" ORDER BY cnt DESC LIMIT 6"
+                res = self.duckdb_engine.query(sql)
+                if res and len(res) >= 2 and "error" not in res[0]:
+                    lbls = [str(r[group_col]) for r in res]
+                    vals = [int(r["cnt"]) for r in res]
+                    chart_type = preferred_type or ("pie" if len(lbls) <= 3 else "bar")
+                    return {
+                        "type": chart_type,
+                        "title": f"各{group_col}指标分布对比情况",
+                        "labels": lbls,
+                        "data": vals,
+                        "series_name": "数量",
+                        "y_label": "统计数(个)"
+                    }
+
+        except Exception:
+            pass
+
+        return None
+
+    def _get_fallback_outline(self) -> List[Dict[str, Any]]:
+        """安全基准大纲兜底"""
+        return [
             {
                 "id": "sec_1",
                 "chapter_title": "第一章 学校概况与办学定位",
@@ -129,9 +358,6 @@ class ReportPipeline:
             }
         ]
 
-        self.sections_plan = sections
-        return sections
-
     async def execute_pipeline(self) -> AsyncGenerator[Dict[str, Any], None]:
         """
         全自动化执行五阶段流水线，流式推送每个阶段与小节的状态和生成产物
@@ -159,13 +385,24 @@ class ReportPipeline:
             # --- Stage 2: 检索阶段 (纯 Python/DuckDB, 0 Token) ---
             yield {"type": "section_stage", "section_id": sec_id, "stage": "retrieving", "text": "正在从 DuckDB 与 Cell Lake 提取数据..."}
             
-            # 检索对应的单元格记录
-            kw = sec["table_keyword"]
-            cells = self.cell_lake.get_all_cells(limit=80)
-            # 过滤对应表的单元格
-            matched_cells = [c for c in cells if kw in c["file_name"] or kw in c["sheet_name"]]
+            # 优先按小节绑定的具体文件名/工作表名做 100% 精确检索
+            matched_cells = []
+            target_file = sec.get("file_name", "")
+            target_sheet = sec.get("sheet_name", "")
+
+            if target_file:
+                matched_cells = self.cell_lake.get_cells_by_file_or_sheet(target_file, target_sheet, limit=100)
+
             if not matched_cells:
-                matched_cells = cells[:15]  # 兜底样本
+                kw = sec.get("table_keyword", "")
+                if kw:
+                    matched_cells = self.cell_lake.search_cells_by_keyword(kw, limit=80)
+
+            if not matched_cells:
+                all_cells = self.cell_lake.get_all_cells(limit=100)
+                matched_cells = [c for c in all_cells if sec.get("table_keyword", "") in c["file_name"] or sec.get("table_keyword", "") in c["sheet_name"]]
+                if not matched_cells:
+                    matched_cells = all_cells[:15]  # 兜底样本
 
             retrieved_summary = {
                 "section": sec_title,
@@ -181,6 +418,7 @@ class ReportPipeline:
                     "status": "已纳入分析",
                     "section_title": sec_title
                 })
+
 
             yield {
                 "type": "section_stage", 
