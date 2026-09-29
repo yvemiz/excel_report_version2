@@ -1,7 +1,10 @@
 import os
+import sys
 import json
 import shutil
 import asyncio
+import subprocess
+import threading
 from typing import AsyncGenerator, Dict, Any, List, Optional
 from app.config import settings
 
@@ -11,7 +14,7 @@ class PiAgentBridge:
     职责：
     1. 动态探测系统 Node.js 运行环境与 pi-main 侧车脚本路径
     2. 将数据事实、单元格坐标与撰写指令序列化为标准 JSON 任务
-    3. 异步唤起 Node.js Pi-Agent 子进程 (stdio 管道通信)
+    3. 唤起 Node.js Pi-Agent 子进程 (完美适配 Windows Proactor 与 Selector 双事件循环)
     4. 逐行反序列化 JSONL 事件流，向流水线和前端实时推送打字文本块
     """
 
@@ -28,7 +31,6 @@ class PiAgentBridge:
         if not os.path.exists(self.sidecar_path):
             return False
         try:
-            # 快速验证 Node.js 是否可正常运行
             return bool(shutil.which(self.node_path) or os.path.exists(self.node_path))
         except Exception:
             return False
@@ -45,6 +47,7 @@ class PiAgentBridge:
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         通过异步子进程调用 Node.js Pi-Agent 智能体
+        自动兼容 Windows SelectorEventLoop 与 ProactorEventLoop
         """
         if not self.is_available():
             raise RuntimeError(f"Pi-Agent 运行环境未就绪 (侧车脚本不存在或 Node 缺失: {self.sidecar_path})")
@@ -60,27 +63,38 @@ class PiAgentBridge:
             "revision_feedback": revision_feedback
         }
 
-        # 启动 Node.js 子进程
-        proc = await asyncio.create_subprocess_exec(
-            self.node_path,
-            self.sidecar_path,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        loop = asyncio.get_running_loop()
+        use_threaded = sys.platform == "win32" and not isinstance(loop, getattr(asyncio, "ProactorEventLoop", type(None)))
+
+        if use_threaded:
+            async for item in self._stream_write_section_threaded(task_payload):
+                yield item
+            return
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.node_path,
+                self.sidecar_path,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+        except NotImplementedError:
+            # SelectorEventLoop 降级兜底
+            async for item in self._stream_write_section_threaded(task_payload):
+                yield item
+            return
 
         accumulated_text = ""
         done_event_yielded = False
 
         try:
-            # 写入任务数据并关闭输入流
             input_bytes = json.dumps(task_payload, ensure_ascii=False).encode("utf-8")
             if proc.stdin:
                 proc.stdin.write(input_bytes)
                 await proc.stdin.drain()
                 proc.stdin.close()
 
-            # 读取 stdout 实时流式事件
             while True:
                 line_bytes = await proc.stdout.readline()
                 if not line_bytes:
@@ -111,7 +125,6 @@ class PiAgentBridge:
                 except json.JSONDecodeError:
                     continue
 
-            # 等待子进程退出
             try:
                 await proc.wait()
             except Exception:
@@ -131,8 +144,67 @@ class PiAgentBridge:
                     await proc.wait()
                 except Exception:
                     pass
-            # 确保 Windows Proactor EventLoop 清理管道
             await asyncio.sleep(0.05)
+
+    async def _stream_write_section_threaded(self, task_payload: Dict[str, Any]) -> AsyncGenerator[Dict[str, Any], None]:
+        """为 Windows SelectorEventLoop 提供的多线程安全子进程管道"""
+        proc = subprocess.Popen(
+            [self.node_path, self.sidecar_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8"
+        )
+        q = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def reader():
+            try:
+                for line in proc.stdout:
+                    loop.call_soon_threadsafe(q.put_nowait, line)
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, None)
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+
+        # 写入任务数据
+        proc.stdin.write(json.dumps(task_payload, ensure_ascii=False) + "\n")
+        proc.stdin.flush()
+        proc.stdin.close()
+
+        accumulated_text = ""
+        done_event_yielded = False
+
+        while True:
+            line_str = await q.get()
+            if line_str is None:
+                break
+            line_str = line_str.strip()
+            if not line_str:
+                continue
+
+            try:
+                event = json.loads(line_str)
+                event_type = event.get("type")
+                if event_type == "chunk":
+                    chunk_text = event.get("text", "")
+                    accumulated_text += chunk_text
+                    yield {"type": "chunk", "text": chunk_text}
+                elif event_type == "done":
+                    accumulated_text = event.get("full_content", accumulated_text)
+                    done_event_yielded = True
+                    yield {"type": "done", "full_content": accumulated_text}
+                    break
+                elif event_type == "error":
+                    print(f"[Pi-Agent Sidecar Error]: {event.get('message')}")
+            except json.JSONDecodeError:
+                continue
+
+        await asyncio.to_thread(proc.wait)
+        if not done_event_yielded and accumulated_text:
+            yield {"type": "done", "full_content": accumulated_text}
 
     async def plan_outline(
         self,
@@ -157,13 +229,22 @@ class PiAgentBridge:
             "school_name": school_name
         }
 
-        proc = await asyncio.create_subprocess_exec(
-            self.node_path,
-            self.sidecar_path,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        loop = asyncio.get_running_loop()
+        use_threaded = sys.platform == "win32" and not isinstance(loop, getattr(asyncio, "ProactorEventLoop", type(None)))
+
+        if use_threaded:
+            return await self._plan_outline_threaded(task_payload)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.node_path,
+                self.sidecar_path,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+        except NotImplementedError:
+            return await self._plan_outline_threaded(task_payload)
 
         planned_sections = None
 
@@ -208,3 +289,28 @@ class PiAgentBridge:
             await asyncio.sleep(0.05)
 
         return planned_sections
+
+    async def _plan_outline_threaded(self, task_payload: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        """Windows SelectorEventLoop 兼容的大纲规划多线程调用"""
+        proc = subprocess.Popen(
+            [self.node_path, self.sidecar_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8"
+        )
+        out, _ = await asyncio.to_thread(proc.communicate, json.dumps(task_payload, ensure_ascii=False))
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if event.get("type") == "done" and "sections" in event:
+                    return event["sections"]
+                elif event.get("type") == "error":
+                    print(f"[Pi-Agent Outline Error]: {event.get('message')}")
+            except json.JSONDecodeError:
+                continue
+        return None
