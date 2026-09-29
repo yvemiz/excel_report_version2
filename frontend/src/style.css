@@ -144,11 +144,6 @@ button {
   color: #64748b;
   border: 1px solid #cbd5e1;
 }
-.badge-purple {
-  background-color: #f5f3ff;
-  color: #7c3aed;
-  border: 1px solid #c4b5fd;
-}
 
 /* 顶栏评估高校输入框 */
 .school-input-box {

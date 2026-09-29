@@ -603,12 +603,7 @@ async function handleScanDirectory() {
     })
     const data = await res.json()
     if (data.success) {
-      const filesCount = data.scanned_files_count || data.sheets_count || 0
-      const cellsCount = data.total_cells_lake || data.total_cells || 0
-      addLog(`[✓] 本地目录扫描完成：已录入 ${filesCount} 份报表，${cellsCount} 个单元格物理入湖！`)
-      if (data.workbook_inspection) {
-        addLog(`🛡️ [完整性预检] ${data.workbook_inspection.summary}`)
-      }
+      addLog(`[✓] 本地目录扫描完成：已录入 ${data.scanned_files_count} 份报表，${data.total_cells_lake} 个单元格物理入湖！`)
       await fetchTables()
       showFolderModal.value = false
     } else {
@@ -650,23 +645,19 @@ async function startPipeline(resume: boolean = false) {
   isPipelineRunning.value = true
   currentStage.value = 1
   stage1JevAudit.value = null
-  const runDesc = resume ? '断点续存恢复运行' : '全新启动全流程'
-  addLog(`流水线启动（${runDesc}）：针对【${schoolName.value || '高校'}】执行确定性五阶段学术研报生成...`)
+  addLog(`流水线启动：针对【${schoolName.value || '高校'}】执行确定性五阶段学术研报生成...`)
 
-  // 若非恢复运行，重置章节内容
-  if (!resume) {
-    sections.value.forEach(s => {
-      s.content = ''
-      s.status = 'pending'
-      s.audit = null
-    })
-  }
+  // 重置章节内容
+  sections.value.forEach(s => {
+    s.content = ''
+    s.status = 'pending'
+    s.audit = null
+  })
 
-  // 使用标准 SSE 流式接收事件，带上当前校名与 resume 参数
-  const params = new URLSearchParams()
-  if (schoolName.value) params.set('school_name', schoolName.value)
-  if (resume) params.set('resume', 'true')
-  const sseUrl = `/api/pipeline/stream?${params.toString()}`
+  // 使用标准 SSE 流式接收事件，带上当前校名参数
+  const sseUrl = schoolName.value 
+    ? `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value)}`
+    : '/api/pipeline/stream'
   const es = new EventSource(sseUrl)
 
   es.onmessage = (event) => {

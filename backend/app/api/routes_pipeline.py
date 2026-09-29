@@ -46,10 +46,10 @@ async def get_pipeline_status():
     }
 
 @router.get("/stream")
-async def pipeline_sse(school_name: Optional[str] = None, resume: bool = False):
-    """SSE 流式事件接口（完美兼容各种浏览器与代理环境，支持断点续存恢复）"""
+async def pipeline_sse(school_name: Optional[str] = None):
+    """SSE 流式事件接口（完美兼容各种浏览器与代理环境）"""
     async def event_generator():
-        async for event in pipeline_instance.execute_pipeline(school_name=school_name, resume=resume):
+        async for event in pipeline_instance.execute_pipeline(school_name=school_name):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             await asyncio.sleep(0.01)
     return StreamingResponse(

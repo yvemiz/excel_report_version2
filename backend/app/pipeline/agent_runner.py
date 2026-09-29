@@ -45,14 +45,6 @@ class PiAgentRunner:
         section_title = section_meta.get("section_title", "")
         objective = section_meta.get("objective", "")
 
-        from app.pipeline.domain_subagents import SubagentRouter
-        from app.pipeline.prompt_enhancer import JevPromptEnhancer, StructuredOutputEnforcer
-
-        # 智能匹配专属 Domain Subagent (Inspired by pi-subagents)
-        subagent = SubagentRouter.route(section_meta)
-        section_meta["subagent_role"] = subagent.role_name
-        section_meta["subagent_title"] = subagent.title
-
         # 1. 尝试触发 chart-tool (如果有图表规划，且未曾生成过)
         chart_markdown = ""
         chart_plan = section_meta.get("chart_plan")
@@ -91,38 +83,25 @@ class PiAgentRunner:
                     if item["type"] == "chunk":
                         pi_full_content += item["text"]
                         yield item
-                    elif item["type"] in ("tool_execution_start", "tool_execution_end", "chart_generated", "agent_info"):
-                        yield item
                     elif item["type"] == "done":
                         pi_full_content = item["full_content"]
                         full_res = f"{chart_markdown}{pi_full_content}" if chart_markdown else pi_full_content
-                        # 结构化输出强校验与自愈
-                        repaired = StructuredOutputEnforcer.validate_and_repair(
-                            full_res, section_title, [c.get("cell_id", "") for c in cell_mappings]
-                        )
-                        yield {"type": "done", "full_content": repaired["repaired_text"]}
+                        yield {"type": "done", "full_content": full_res}
                         return
 
                 if pi_full_content:
                     full_res = f"{chart_markdown}{pi_full_content}" if chart_markdown else pi_full_content
-                    repaired = StructuredOutputEnforcer.validate_and_repair(
-                        full_res, section_title, [c.get("cell_id", "") for c in cell_mappings]
-                    )
-                    yield {"type": "done", "full_content": repaired["repaired_text"]}
+                    yield {"type": "done", "full_content": full_res}
                     return
 
             except Exception as e:
                 print(f"[Pi-Agent Bridge Warning]: {e}, 自动平滑切换至 Python 原生引擎")
 
-        # 3. 判断是否可以使用 DeepSeek API
+        # 2. 判断是否可以使用 DeepSeek API
         has_valid_key = bool(self.api_key and not self.api_key.startswith("your_"))
         
         if has_valid_key:
-            raw_prompt = self._build_prompt(chapter_title, section_title, objective, retrieved_data, cell_mappings, revision_feedback)
-            # Jev Prompt 决策模型增强 (Inspired by @hikae/pi-prompt-enhancer)
-            enhanced = JevPromptEnhancer.enhance(raw_prompt, subagent.system_instruction)
-            prompt = enhanced["enhanced_prompt"]
-
+            prompt = self._build_prompt(chapter_title, section_title, objective, retrieved_data, cell_mappings, revision_feedback)
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"

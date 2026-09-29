@@ -84,25 +84,13 @@ class DocxExporter:
         # 封皮后插入分页符
         doc.add_page_break()
 
-        # ==================== 2. 报告简目导航与原生目录域 ====================
+        # ==================== 2. 报告简目导航 ====================
         toc_p = doc.add_paragraph()
         toc_run = toc_p.add_run("【 报 告 概 览 与 章 节 目 录 】")
         toc_run.font.size = Pt(13)
         toc_run.font.bold = True
         toc_run.font.color.rgb = RGBColor(30, 61, 89)
         toc_p.paragraph_format.space_after = Pt(10)
-
-        # 嵌入 Word 规范原生目录域代码 (TOC Field, Word 中自动生成带页码目录)
-        p_toc_field = doc.add_paragraph()
-        run_fld = p_toc_field.add_run()
-        fldChar1 = parse_xml(r'<w:fldChar %s w:fldCharType="begin"/>' % nsdecls('w'))
-        instrText = parse_xml(r'<w:instrText %s xml:space="preserve"> TOC \o "1-3" \h \z \u </w:instrText>' % nsdecls('w'))
-        fldChar2 = parse_xml(r'<w:fldChar %s w:fldCharType="separate"/>' % nsdecls('w'))
-        fldChar3 = parse_xml(r'<w:fldChar %s w:fldCharType="end"/>' % nsdecls('w'))
-        run_fld._r.append(fldChar1)
-        run_fld._r.append(instrText)
-        run_fld._r.append(fldChar2)
-        run_fld._r.append(fldChar3)
 
         for sec in sections:
             sec_p = doc.add_paragraph()
@@ -112,7 +100,7 @@ class DocxExporter:
             r_item.font.size = Pt(10.5)
             r_item.font.color.rgb = RGBColor(71, 85, 105)
 
-        doc.add_page_break()
+        doc.add_paragraph().paragraph_format.space_after = Pt(16)
 
         # ==================== 3. 正文分章节排版 ====================
         all_citations_for_appendix = []
@@ -123,13 +111,8 @@ class DocxExporter:
             level = sec.get("level", 1)
             content = sec.get("content", "")
 
-            # 标题排版（使用 Heading 样式使得 Word 原生目录与导航窗格自动感知）
-            heading_style = "Heading 1" if level == 1 else "Heading 2"
-            try:
-                h_p = doc.add_paragraph(style=heading_style)
-            except Exception:
-                h_p = doc.add_paragraph()
-
+            # 标题排版
+            h_p = doc.add_paragraph()
             h_p.paragraph_format.space_before = Pt(16)
             h_p.paragraph_format.space_after = Pt(8)
             h_p.paragraph_format.keep_with_next = True
@@ -144,7 +127,7 @@ class DocxExporter:
                 h_run.font.color.rgb = RGBColor(51, 65, 85)
 
             # 收集该章节正文中的所有引用
-            for m in re.finditer(r'\[([^\]]+)\]\[\^(cell_[a-zA-Z0-9_]+)\]', content):
+            for m in re.finditer(r'\[([^\]]+)\]\[\^(cell_[a-f0-9]+)\]', content):
                 all_citations_for_appendix.append({
                     "section_title": title,
                     "cited_text": m.group(1),
@@ -209,44 +192,16 @@ class DocxExporter:
 
                 # 普通段落渲染：首行缩进，高保真学术公文排版
                 p = doc.add_paragraph()
-                p.paragraph_format.line_spacing = 1.35
+                p.paragraph_format.line_spacing = 1.3
                 p.paragraph_format.space_after = Pt(6)
-                p.paragraph_format.first_line_indent = Inches(0.28)  # 约合中文两字符缩进
 
-                # 逐段解析 [数值][^cell_id] 引用并生成优雅的学术角标
-                pattern = re.compile(r'\[([^\]]+)\]\[\^(cell_[a-zA-Z0-9_]+)\]')
-                last_idx = 0
-                for match in pattern.finditer(line_str):
-                    start, end = match.span()
-                    if start > last_idx:
-                        prefix_text = line_str[last_idx:start]
-                        prefix_text = re.sub(r'\*\*(.*?)\*\*', r'\1', prefix_text)
-                        r = p.add_run(prefix_text)
-                        r.font.size = Pt(11)
-                        r.font.color.rgb = RGBColor(30, 41, 59)
+                # 将 [数值][^cell_id] 规范化为 [数值*]
+                clean_line = re.sub(r'\[([^\]]+)\]\[\^cell_[a-f0-9]+\]', r'[\1*]', line_str)
+                clean_line = re.sub(r'\*\*(.*?)\*\*', r'\1', clean_line)
 
-                    val_text = match.group(1)
-                    val_text = re.sub(r'\*\*(.*?)\*\*', r'\1', val_text)
-                    cid_text = match.group(2)
-
-                    r_val = p.add_run(val_text)
-                    r_val.font.size = Pt(11)
-                    r_val.font.bold = True
-                    r_val.font.color.rgb = RGBColor(30, 61, 89)
-
-                    r_sup = p.add_run(f"[{cid_text}]")
-                    r_sup.font.size = Pt(8.5)
-                    r_sup.font.superscript = True
-                    r_sup.font.color.rgb = RGBColor(79, 70, 229)
-
-                    last_idx = end
-
-                if last_idx < len(line_str):
-                    suffix_text = line_str[last_idx:]
-                    suffix_text = re.sub(r'\*\*(.*?)\*\*', r'\1', suffix_text)
-                    r = p.add_run(suffix_text)
-                    r.font.size = Pt(11)
-                    r.font.color.rgb = RGBColor(30, 41, 59)
+                run = p.add_run(clean_line)
+                run.font.size = Pt(11)
+                run.font.color.rgb = RGBColor(30, 41, 59)
 
         # ==================== 4. 附录：全文核心指标数据穿透溯源清单 ====================
         if all_citations_for_appendix:

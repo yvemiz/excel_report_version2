@@ -20,22 +20,11 @@ class PiAgentBridge:
 
     def __init__(self):
         self.node_path = shutil.which("node") or "node"
-        bundled_sidecar = os.path.join(
-            settings.BASE_DIR,
-            "sidecar",
-            "pi_agent_core_bundle.mjs"
-        )
-        legacy_sidecar = os.path.join(
+        self.sidecar_path = os.path.join(
             os.path.dirname(settings.BASE_DIR),
             "pi-main",
             "pi_agent_sidecar.mjs"
         )
-        if os.path.exists(bundled_sidecar):
-            self.sidecar_path = bundled_sidecar
-        elif os.path.exists(legacy_sidecar):
-            self.sidecar_path = legacy_sidecar
-        else:
-            self.sidecar_path = bundled_sidecar
 
     def is_available(self) -> bool:
         """检查 Node.js 运行环境与 Pi 侧车脚本是否就绪"""
@@ -69,8 +58,6 @@ class PiAgentBridge:
             "base_url": base_url,
             "model": model,
             "section_meta": section_meta,
-            "subagent_role": section_meta.get("subagent_role", "OverviewSpecialist"),
-            "subagent_title": section_meta.get("subagent_title", "办学定位与综合概况专家"),
             "retrieved_data": retrieved_data,
             "cell_mappings": cell_mappings,
             "revision_feedback": revision_feedback
@@ -125,9 +112,6 @@ class PiAgentBridge:
                         chunk_text = event.get("text", "")
                         accumulated_text += chunk_text
                         yield {"type": "chunk", "text": chunk_text}
-
-                    elif event_type in ("tool_execution_start", "tool_execution_end", "chart_generated", "agent_info"):
-                        yield event
 
                     elif event_type == "done":
                         accumulated_text = event.get("full_content", accumulated_text)
@@ -208,8 +192,6 @@ class PiAgentBridge:
                     chunk_text = event.get("text", "")
                     accumulated_text += chunk_text
                     yield {"type": "chunk", "text": chunk_text}
-                elif event_type in ("tool_execution_start", "tool_execution_end", "chart_generated", "agent_info"):
-                    yield event
                 elif event_type == "done":
                     accumulated_text = event.get("full_content", accumulated_text)
                     done_event_yielded = True

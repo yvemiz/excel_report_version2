@@ -128,10 +128,8 @@ class ScanDirectoryRequest(BaseModel):
 async def scan_directory_data(req: ScanDirectoryRequest):
     """
     极速扫描并摄入指定本地目录中的大量 Excel 报表（可承载 500+ 个文件）
-    采用 asyncio.to_thread 异步卸载 CPU 密集计算，杜绝阻塞主事件循环
-    按 Sheet 边解析边分批入库，大幅降低海量数据瞬时内存占用
+    避免浏览器 HTTP 单次上传大批量文件导致的连接数耗尽或网络超时
     """
-    import asyncio
     dir_path = req.directory_path.strip()
     if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
         raise HTTPException(status_code=400, detail=f"指定的目录不存在或不是文件夹: {dir_path}")
@@ -140,49 +138,33 @@ async def scan_directory_data(req: ScanDirectoryRequest):
         cell_lake_instance.clear()
         duckdb_instance.clear()
 
-    # 异步非阻塞卸载至工作线程/进程池
-    parsed_sheets = await asyncio.to_thread(STCParser.parse_directory, dir_path, recursive=req.recursive)
+    parsed_sheets = STCParser.parse_directory(dir_path, recursive=req.recursive)
     if not parsed_sheets:
         return {"success": False, "message": "该目录下未扫描到任何 .xls 或 .xlsx 文件", "total_files": 0}
 
     loaded_summary = []
-    total_cells = 0
-    unique_files = set()
+    all_cells_flat = []
 
     for ps in parsed_sheets:
         tbl = duckdb_instance.register_sheet(ps["sheet_name"], ps["file_name"], ps["rows"], ps["header_paths"])
-        unique_files.add(ps["file_name"])
-        # 流式逐 Sheet 批量入库，避免占用海量堆内存
-        if ps.get("cells"):
-            c_added = cell_lake_instance.insert_cells(ps["cells"], batch_size=2000)
-            total_cells += c_added
-
+        all_cells_flat.extend(ps["cells"])
         loaded_summary.append({
             "file_name": ps["file_name"],
             "sheet_name": ps["sheet_name"],
             "row_count": ps["row_count"],
-            "cells_count": len(ps.get("cells", [])),
+            "cells_count": len(ps["cells"]),
             "table_name": tbl,
-            "headers": ps.get("header_paths", [])[:8]
+            "headers": ps["header_paths"][:8]
         })
 
+    total_cells = cell_lake_instance.insert_cells(all_cells_flat, batch_size=5000)
     detected_school = cell_lake_instance.detect_school_metadata()
-
-    from app.core.workbook_inspector import WorkbookInspector
-    inspection_res = WorkbookInspector.inspect_directory(dir_path)
 
     return {
         "success": True,
-        "message": f"成功批量扫描并入库 {len(unique_files)} 份报表（{len(loaded_summary)} 个工作表），共计 {total_cells} 个单元格物理坐标进入 Cell Lake",
+        "message": f"成功批量扫描并入库 {len(loaded_summary)} 个工作表，共计 {total_cells} 个单元格物理坐标进入 Cell Lake",
         "sheets_count": len(loaded_summary),
-        "scanned_files_count": len(unique_files),
         "total_cells": cell_lake_instance.count(),
-        "total_cells_lake": cell_lake_instance.count(),
         "school_metadata": detected_school,
-        "school_name": detected_school.get("school_name", ""),
-        "workbook_inspection": {
-            "overall_health_rate": inspection_res.get("overall_health_rate", 100.0),
-            "healthy_files": inspection_res.get("healthy_files", len(unique_files)),
-            "summary": f"工作簿完整性防越界审计健康率 {inspection_res.get('overall_health_rate', 100.0)}%，已验证 {inspection_res.get('healthy_files', len(unique_files))}/{len(unique_files)} 份报表"
-        }
+        "school_name": detected_school.get("school_name", "")
     }
