@@ -1,0 +1,15 @@
+.git
+.github
+.gitignore
+.env
+.env.*
+node_modules
+frontend/node_modules
+backend/__pycache__
+backend/.pytest_cache
+backend/data/*.db*
+backend/data/uploads/*
+backend/data/exports/*
+backend/static/charts/*
+*.bat
+*.ps1

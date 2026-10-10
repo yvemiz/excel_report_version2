@@ -673,6 +673,14 @@ async function startPipeline(resume: boolean = false) {
     try {
       const data = JSON.parse(event.data)
 
+      if (data.type === 'pipeline_error') {
+        addLog(`❌ 流水线执行失败: ${data.message || '未知错误'}`)
+        es.close()
+        isPipelineRunning.value = false
+        currentRunningText.value = ''
+        return
+      }
+
       if (data.type === 'stage_update') {
         currentStage.value = data.stage_id
         const st = stages.value.find(s => s.id === data.stage_id)
@@ -755,10 +763,14 @@ async function startPipeline(resume: boolean = false) {
 
   es.onerror = (e) => {
     console.error('SSE Error:', e)
+    if (isPipelineRunning.value) {
+      addLog('❌ 流水线数据流连接中断，请检查后端运行状态')
+    }
     es.close()
     isPipelineRunning.value = false
     currentRunningText.value = ''
   }
+
 }
 
 // 动态渲染 Mermaid

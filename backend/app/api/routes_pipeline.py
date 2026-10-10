@@ -49,9 +49,19 @@ async def get_pipeline_status():
 async def pipeline_sse(school_name: Optional[str] = None, resume: bool = False):
     """SSE 流式事件接口（完美兼容各种浏览器与代理环境，支持断点续存恢复）"""
     async def event_generator():
-        async for event in pipeline_instance.execute_pipeline(school_name=school_name, resume=resume):
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.01)
+        try:
+            async for event in pipeline_instance.execute_pipeline(school_name=school_name, resume=resume):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.01)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            err_event = {
+                "type": "pipeline_error",
+                "message": str(e)
+            }
+            yield f"data: {json.dumps(err_event, ensure_ascii=False)}\n\n"
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -61,6 +71,7 @@ async def pipeline_sse(school_name: Optional[str] = None, resume: bool = False):
             "X-Accel-Buffering": "no"
         }
     )
+
 
 @router.websocket("/ws")
 async def pipeline_websocket(websocket: WebSocket):
