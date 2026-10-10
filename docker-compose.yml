@@ -15,7 +15,9 @@ services:
     ports:
       - "8008:8008"
     volumes:
-      # 持久化存储数据、上传文件与导出报表到宿主机，便于宝塔面板文件管理中直接查看与下载
+      # 挂载业务代码与持久化数据，宿主机更新代码即可秒级生效，无需每次漫长重构镜像
+      - ./backend/app:/app/backend/app
+      - ./backend/sidecar:/app/backend/sidecar
       - ./backend/data:/app/backend/data
       - ./backend/static/charts:/app/backend/static/charts
     healthcheck:
@@ -36,6 +38,9 @@ services:
     ports:
       # 默认宿主机 8080 端口，避免与宝塔面板默认 Nginx 占用的 80 端口冲突
       - "8080:80"
+    volumes:
+      # 挂载前端打包产物，本地构建后上传即可刷新生效
+      - ./frontend/dist:/usr/share/nginx/html
     depends_on:
       backend:
         condition: service_healthy
