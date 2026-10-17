@@ -171,6 +171,7 @@ class STCParser:
                 "cells": cells_data
             })
 
+        wb.close()
         return results
 
     @classmethod
@@ -281,7 +282,7 @@ class STCParser:
         return hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
 
     @classmethod
-    def parse_directory(cls, dir_path: str, recursive: bool = True, max_workers: int = 8) -> List[Dict[str, Any]]:
+    def parse_directory(cls, dir_path: str, recursive: bool = True, max_workers: int = 8, file_validator=None) -> List[Dict[str, Any]]:
         """
         批量并发扫描并解析指定本地目录中的所有 Excel 报表 (.xls / .xlsx)
         支持多达 500+ 个文件的并行解析，耗时大幅压缩
@@ -303,6 +304,9 @@ class STCParser:
 
         if not matched_files:
             return []
+        if file_validator:
+            for file_path in matched_files:
+                file_validator(file_path)
 
         all_parsed_tables = []
         workers = min(max_workers, len(matched_files), os.cpu_count() or 4)

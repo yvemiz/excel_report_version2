@@ -23,6 +23,23 @@ class DocxExporter:
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
+    @staticmethod
+    def _strip_cell_citations(text: str) -> str:
+        """输出可读正文，原始引用仍保留在流水线数据和对账表中。"""
+        # 去掉 Markdown 脚注定义行，避免其内部编号和说明落入正文。
+        text = re.sub(
+            r'^\s*\[\s*\^\s*cell_[^\]\r\n]*\]\s*[:：].*$',
+            '', text, flags=re.IGNORECASE | re.MULTILINE,
+        )
+        # 保留 [数值][^cell_id] 中的数值；连续脚注不能被当成数值。
+        text = re.sub(
+            r'\[((?!\s*\^\s*cell_)[^\]\r\n]+)\]\s*\[\s*\^\s*cell_[^\]\r\n]*\]',
+            r'\1', text, flags=re.IGNORECASE,
+        )
+        # 同时清理单独脚注、连续脚注，以及旧导出遗留的 [^cell_id*]。
+        text = re.sub(r'\[\s*\^\s*cell_[^\]\r\n]*\]', '', text, flags=re.IGNORECASE)
+        return re.sub(r'\[\s*\^\s*cell_[^\]\r\n]*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+
     def export_report(self, report_title: str, school_name: str, sections: List[Dict[str, Any]], charts_dir: str) -> str:
         doc = Document()
 
@@ -108,7 +125,7 @@ class DocxExporter:
             sec_p = doc.add_paragraph()
             sec_p.paragraph_format.line_spacing = 1.3
             sec_p.paragraph_format.space_after = Pt(3)
-            r_item = sec_p.add_run(f"•  {sec.get('title', '')}")
+            r_item = sec_p.add_run(f"•  {self._strip_cell_citations(sec.get('title', ''))}")
             r_item.font.size = Pt(10.5)
             r_item.font.color.rgb = RGBColor(71, 85, 105)
 
@@ -119,7 +136,7 @@ class DocxExporter:
         in_mermaid = False
 
         for sec in sections:
-            title = sec.get("title", "")
+            title = self._strip_cell_citations(sec.get("title", ""))
             level = sec.get("level", 1)
             content = sec.get("content", "")
 
@@ -144,15 +161,26 @@ class DocxExporter:
                 h_run.font.color.rgb = RGBColor(51, 65, 85)
 
             # 收集该章节正文中的所有引用
-            for m in re.finditer(r'\[([^\]]+)\]\[\^(cell_[a-zA-Z0-9_]+)\]', content):
+            for m in re.finditer(
+                r'\[((?!\s*\^\s*cell_)[^\]\r\n]+)\]\s*\[\s*\^\s*(cell_[a-zA-Z0-9_]+)\s*\]',
+                content, flags=re.IGNORECASE,
+            ):
+                source = next((
+                    citation for citation in (sec.get("audit") or {}).get("citations", [])
+                    if citation.get("cell_id") == m.group(2)
+                ), {})
+                source_location = (
+                    f"{source.get('sheet_name', '')}!{source['cell_ref']}"
+                    if source.get("cell_ref") else "见 Excel 对账表"
+                )
                 all_citations_for_appendix.append({
                     "section_title": title,
-                    "cited_text": m.group(1),
-                    "cell_id": m.group(2)
+                    "cited_text": self._strip_cell_citations(m.group(1)),
+                    "source_location": source_location,
                 })
 
             # 正文段落与图表解析
-            lines = content.split("\n")
+            lines = self._strip_cell_citations(content).split("\n")
             for line in lines:
                 line_str = line.strip()
                 if not line_str:
@@ -203,8 +231,8 @@ class DocxExporter:
                         caption_p.paragraph_format.space_after = Pt(10)
                     continue
 
-                # 忽略以 # 开头的重复小标题
-                if line_str.startswith("### "):
+                # 忽略模型重复输出的小节标题，避免 Markdown 标记落入 Word。
+                if line_str.startswith(("## ", "### ")):
                     continue
 
                 # 普通段落渲染：首行缩进，高保真学术公文排版
@@ -213,40 +241,11 @@ class DocxExporter:
                 p.paragraph_format.space_after = Pt(6)
                 p.paragraph_format.first_line_indent = Inches(0.28)  # 约合中文两字符缩进
 
-                # 逐段解析 [数值][^cell_id] 引用并生成优雅的学术角标
-                pattern = re.compile(r'\[([^\]]+)\]\[\^(cell_[a-zA-Z0-9_]+)\]')
-                last_idx = 0
-                for match in pattern.finditer(line_str):
-                    start, end = match.span()
-                    if start > last_idx:
-                        prefix_text = line_str[last_idx:start]
-                        prefix_text = re.sub(r'\*\*(.*?)\*\*', r'\1', prefix_text)
-                        r = p.add_run(prefix_text)
-                        r.font.size = Pt(11)
-                        r.font.color.rgb = RGBColor(30, 41, 59)
+                clean_line = re.sub(r'\*\*(.*?)\*\*', r'\1', line_str)
 
-                    val_text = match.group(1)
-                    val_text = re.sub(r'\*\*(.*?)\*\*', r'\1', val_text)
-                    cid_text = match.group(2)
-
-                    r_val = p.add_run(val_text)
-                    r_val.font.size = Pt(11)
-                    r_val.font.bold = True
-                    r_val.font.color.rgb = RGBColor(30, 61, 89)
-
-                    r_sup = p.add_run(f"[{cid_text}]")
-                    r_sup.font.size = Pt(8.5)
-                    r_sup.font.superscript = True
-                    r_sup.font.color.rgb = RGBColor(79, 70, 229)
-
-                    last_idx = end
-
-                if last_idx < len(line_str):
-                    suffix_text = line_str[last_idx:]
-                    suffix_text = re.sub(r'\*\*(.*?)\*\*', r'\1', suffix_text)
-                    r = p.add_run(suffix_text)
-                    r.font.size = Pt(11)
-                    r.font.color.rgb = RGBColor(30, 41, 59)
+                run = p.add_run(clean_line)
+                run.font.size = Pt(11)
+                run.font.color.rgb = RGBColor(30, 41, 59)
 
         # ==================== 4. 附录：全文核心指标数据穿透溯源清单 ====================
         if all_citations_for_appendix:
@@ -266,7 +265,7 @@ class DocxExporter:
             intro_p.paragraph_format.space_after = Pt(12)
 
             # 插入对账表格
-            headers = ["序号", "报告章节", "引用数值", "单元格索引 ID", "核验状态"]
+            headers = ["序号", "报告章节", "引用数值", "来源位置", "核验状态"]
             table = doc.add_table(rows=1, cols=len(headers))
             table.alignment = WD_TABLE_ALIGNMENT.CENTER
             table.autofit = False
@@ -290,7 +289,7 @@ class DocxExporter:
                 row_cells[0].text = str(row_idx)
                 row_cells[1].text = cit["section_title"]
                 row_cells[2].text = cit["cited_text"]
-                row_cells[3].text = cit["cell_id"]
+                row_cells[3].text = cit["source_location"]
                 row_cells[4].text = "100% 吻合"
 
                 # 隔行浅灰斑马纹

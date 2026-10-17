@@ -1,44 +1,49 @@
 import os
 import shutil
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from app.config import settings
 from app.core.stc_parser import STCParser
-from app.core.cell_lake import CellLake
-from app.core.duckdb_engine import DuckDBEngine
+from app.core.workspaces import Workspace, get_workspace, get_mutable_workspace
 
 router = APIRouter(prefix="/api", tags=["Upload & Data Ingestion"])
 
-# 全局单例引用（在 main.py 中注入初始化）
-cell_lake_instance: CellLake = None
-duckdb_instance: DuckDBEngine = None
+def validate_import_path(path, workspace: Workspace):
+    resolved = Path(path).resolve()
+    if resolved.is_relative_to(workspace.upload_dir.resolve()):
+        return
+    if resolved.is_relative_to(workspace.data_root) or workspace.data_root.is_relative_to(resolved):
+        raise HTTPException(status_code=403, detail="不能导入系统数据目录或其他账号的文件，请使用独立的报表文件夹")
 
-def init_upload_routes(lake: CellLake, duck: DuckDBEngine):
-    global cell_lake_instance, duckdb_instance
-    cell_lake_instance = lake
-    duckdb_instance = duck
 
 @router.post("/upload")
-async def upload_excel(files: List[UploadFile] = File(...)):
+async def upload_excel(files: List[UploadFile] = File(...), workspace: Workspace = Depends(get_mutable_workspace)):
     """上传一个或多个 Excel 文件并执行 STC 解析、Cell Lake 入库和 DuckDB 注册"""
     if not files:
         raise HTTPException(status_code=400, detail="未上传任何文件")
+    cell_lake_instance, duckdb_instance = workspace.cell_lake, workspace.duckdb
 
     uploaded_summary = []
     total_cells_added = 0
 
     for file in files:
-        ext = os.path.splitext(file.filename)[1].lower()
+        filename = file.filename or ""
+        if not filename or filename != Path(filename.replace("\\", "/")).name or "\x00" in filename:
+            raise HTTPException(status_code=400, detail="文件名无效")
+        ext = os.path.splitext(filename)[1].lower()
         if ext not in [".xls", ".xlsx"]:
             continue
 
-        save_path = os.path.join(settings.UPLOAD_DIR, file.filename)
+        save_path = workspace.upload_dir / filename
         with open(save_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
         # STC 复合表头解析
         sheets_data = STCParser.parse_file(save_path)
+        if sheets_data:
+            workspace.mark_data_changed()
         for s in sheets_data:
             c_count = cell_lake_instance.insert_cells(s["cells"])
             total_cells_added += c_count
@@ -62,12 +67,14 @@ async def upload_excel(files: List[UploadFile] = File(...)):
     }
 
 @router.post("/load_example_data")
-async def load_example_data():
+async def load_example_data(workspace: Workspace = Depends(get_mutable_workspace)):
     """一键加载 example/ 目录下的 8 个高校真实报表数据"""
     example_dir = os.path.join(os.path.dirname(settings.BASE_DIR), "example")
+    cell_lake_instance, duckdb_instance = workspace.cell_lake, workspace.duckdb
     if not os.path.exists(example_dir):
         raise HTTPException(status_code=404, detail="example 目录不存在")
 
+    workspace.mark_data_changed()
     cell_lake_instance.clear()
     duckdb_instance.clear()
     loaded = []
@@ -98,20 +105,39 @@ async def load_example_data():
     }
 
 @router.get("/tables")
-async def get_tables():
+async def get_tables(workspace: Workspace = Depends(get_workspace)):
     """获取 DuckDB 目录层与数据指标列表及嗅探到的学校元数据"""
+    cell_lake_instance, duckdb_instance = workspace.cell_lake, workspace.duckdb
     school_meta = cell_lake_instance.detect_school_metadata()
+    cell_counts = {
+        (item["file_name"], item["sheet_name"]): item["cell_count"]
+        for item in cell_lake_instance.get_tables_summary()
+    }
     return {
-        "catalog": duckdb_instance.get_catalog(),
+        "catalog": [
+            {**item, "cells_count": cell_counts.get((item["file_name"], item["sheet_name"]), 0)}
+            for item in duckdb_instance.get_catalog()
+        ],
         "total_cells": cell_lake_instance.count(),
         "school_metadata": school_meta,
         "school_name": school_meta.get("school_name", "")
     }
 
+@router.delete("/tables")
+def clear_tables(workspace: Workspace = Depends(get_mutable_workspace)):
+    """清空当前账号入库数据，不删除账号、模型配置或已生成报告。"""
+    return workspace.delete_data()
+
+
+@router.delete("/tables/{table_name}")
+def delete_table(table_name: str, workspace: Workspace = Depends(get_mutable_workspace)):
+    """删除当前账号目录中的单个工作表及其来源单元格。"""
+    return workspace.delete_data(table_name)
+
 @router.get("/cell/{cell_id}")
-async def get_cell_detail(cell_id: str):
+async def get_cell_detail(cell_id: str, workspace: Workspace = Depends(get_workspace)):
     """根据 cell_id 查询单元格物理坐标与值（用于前端 Hover 穿透气泡）"""
-    cell = cell_lake_instance.get_cell(cell_id)
+    cell = workspace.cell_lake.get_cell(cell_id)
     if not cell:
         raise HTTPException(status_code=404, detail="未找到该单元格记录")
     return {
@@ -125,7 +151,7 @@ class ScanDirectoryRequest(BaseModel):
     clear_existing: bool = True
 
 @router.post("/scan_directory")
-async def scan_directory_data(req: ScanDirectoryRequest):
+async def scan_directory_data(req: ScanDirectoryRequest, workspace: Workspace = Depends(get_mutable_workspace)):
     """
     极速扫描并摄入指定本地目录中的大量 Excel 报表（可承载 500+ 个文件）
     采用 asyncio.to_thread 异步卸载 CPU 密集计算，杜绝阻塞主事件循环
@@ -133,17 +159,21 @@ async def scan_directory_data(req: ScanDirectoryRequest):
     """
     import asyncio
     dir_path = req.directory_path.strip()
+    cell_lake_instance, duckdb_instance = workspace.cell_lake, workspace.duckdb
     if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
         raise HTTPException(status_code=400, detail=f"指定的目录不存在或不是文件夹: {dir_path}")
 
+    validate_import_path(dir_path, workspace)
+    parsed_sheets = await asyncio.to_thread(
+        STCParser.parse_directory, dir_path, recursive=req.recursive,
+        file_validator=lambda path: validate_import_path(path, workspace),
+    )
+    if not parsed_sheets:
+        return {"success": False, "message": "该目录下未扫描到任何 .xls 或 .xlsx 文件", "total_files": 0}
+    workspace.mark_data_changed()
     if req.clear_existing:
         cell_lake_instance.clear()
         duckdb_instance.clear()
-
-    # 异步非阻塞卸载至工作线程/进程池
-    parsed_sheets = await asyncio.to_thread(STCParser.parse_directory, dir_path, recursive=req.recursive)
-    if not parsed_sheets:
-        return {"success": False, "message": "该目录下未扫描到任何 .xls 或 .xlsx 文件", "total_files": 0}
 
     loaded_summary = []
     total_cells = 0

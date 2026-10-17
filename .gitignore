@@ -72,6 +72,8 @@ backend/data/*.db*
 backend/data/*.duckdb*
 backend/data/*.wal
 backend/data/*.jsonl
+# 每个账号的上传文件、报告、图表、配置与断点均为私有运行数据
+backend/data/users/
 
 # 动态上传的文件（保留 .gitkeep）
 backend/data/uploads/*
@@ -121,6 +123,7 @@ pi-main/.artifacts/
 # ------------------------------------------------------------------------------
 # 6. 编辑器与操作系统专属文件 (IDE & OS)
 # ------------------------------------------------------------------------------
+.archify/
 .vscode/
 !.vscode/settings.json
 !.vscode/tasks.json

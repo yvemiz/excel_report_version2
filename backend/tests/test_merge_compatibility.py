@@ -1,0 +1,160 @@
+"""Regression checks for merging the remote pipeline with account workspaces."""
+import asyncio
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from docx import Document
+from fastapi.testclient import TestClient
+
+from app.application import create_app
+from app.config import settings
+from app.core.auth_service import COOKIE_NAME
+from app.core.telemetry_service import TelemetryService
+
+
+class MergeCompatibilityTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.app = create_app(self.directory.name, ["http://testserver"])
+        self.client = TestClient(self.app)
+        self.client.__enter__()
+
+    def tearDown(self):
+        self.client.__exit__(None, None, None)
+        self.directory.cleanup()
+
+    def account(self, name):
+        self.client.cookies.clear()
+        response = self.client.post("/api/auth/register", json={
+            "username": name, "password": "Test-password-12345",
+        })
+        self.assertEqual(response.status_code, 201, response.text)
+        cookie = {"Cookie": f"{COOKIE_NAME}={response.cookies[COOKIE_NAME]}"}
+        workspace = self.app.state.workspaces.get(response.json()["user"]["id"])
+        self.client.cookies.clear()
+        return workspace, cookie
+
+    @staticmethod
+    def add_cell(workspace, cell_id="cell_scope"):
+        workspace.cell_lake.insert_cells([{
+            "cell_id": cell_id, "file_name": "school.xlsx", "sheet_name": "Summary",
+            "row_idx": 2, "col_idx": 1, "cell_ref": "A2",
+            "metric_path": "教师人数", "raw_value": "42", "numeric_value": 42,
+        }])
+
+    def test_container_health_check_does_not_require_account(self):
+        response = self.client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "healthy"})
+        self.assertEqual(self.client.get("/api/health").status_code, 401)
+
+    def test_docker_frontend_origin_can_register(self):
+        with tempfile.TemporaryDirectory() as root:
+            with patch.dict("os.environ", {"APP_ALLOWED_ORIGINS": "http://localhost:8080"}):
+                app = create_app(root)
+            with TestClient(app) as client:
+                response = client.post("/api/auth/register", headers={"Origin": "http://localhost:8080"}, json={
+                    "username": "docker_teacher", "password": "Test-password-12345",
+                })
+                self.assertEqual(response.status_code, 201, response.text)
+
+    def test_telemetry_and_balance_are_scoped_to_account(self):
+        first, first_cookie = self.account("teacher_a")
+        _, second_cookie = self.account("teacher_b")
+        TelemetryService.record_section_trace(
+            "sec_a", "Private chapter", "OverviewSpecialist", 100, 10, 20, 0.95, 1, True,
+            trace_file=first.pipeline.telemetry_file,
+        )
+        own = self.client.get("/api/pipeline/telemetry", headers=first_cookie)
+        other = self.client.get("/api/pipeline/telemetry", headers=second_cookie)
+        self.assertEqual(own.status_code, 200, own.text)
+        self.assertEqual(other.status_code, 200, other.text)
+        self.assertEqual(own.json()["total_sections_traced"], 1)
+        self.assertEqual(other.json()["total_sections_traced"], 0)
+        with patch.object(settings, "DEEPSEEK_API_KEY", "global-key-must-not-be-used"):
+            balance = self.client.get("/api/pipeline/balance", headers=second_cookie)
+        self.assertEqual(balance.status_code, 200, balance.text)
+        self.assertFalse(balance.json()["is_configured"])
+        self.assertEqual(balance.json()["token_burn_summary"]["total_sections_traced"], 0)
+
+    def test_sse_keeps_resume_and_account_operation_lock(self):
+        workspace, cookie = self.account("teacher_sse")
+        self.add_cell(workspace)
+        calls = []
+
+        async def execute(**kwargs):
+            calls.append(kwargs)
+            yield {"type": "stage_update", "stage_id": 1, "status": "running"}
+
+        with patch.object(workspace.pipeline, "execute_pipeline", execute):
+            response = self.client.get("/api/pipeline/stream?resume=true&school_name=Test", headers=cookie)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["x-accel-buffering"], "no")
+        self.assertEqual(calls, [{"school_name": "Test", "resume": True}])
+        self.assertFalse(workspace.operation_lock.locked())
+
+    def test_resume_uses_account_checkpoint_and_rejects_changed_data(self):
+        first, _ = self.account("teacher_resume")
+        second, _ = self.account("teacher_empty")
+        self.add_cell(first)
+        pipe = first.pipeline
+        content = "学校现有专任教师[42人][^cell_scope]。" * 12
+        writes = []
+        outline = [{
+            "id": "sec_scope", "chapter_title": "第一章 学校概况",
+            "section_title": "1.1 师资规模", "objective": "分析教师规模",
+            "file_name": "school.xlsx", "sheet_name": "Summary", "table_name": "tbl_school",
+            "bound_files": ["school.xlsx"],
+        }]
+
+        async def plan(**kwargs):
+            pipe.sections_plan = outline
+            return outline
+
+        async def write(*args, **kwargs):
+            writes.append(1)
+            yield {"type": "chunk", "text": content}
+            yield {"type": "done", "full_content": content}
+
+        async def run(resume=False):
+            return [event async for event in pipe.execute_pipeline(school_name="Test University", resume=resume)]
+
+        with patch.object(pipe, "async_plan_outline", plan), patch.object(pipe.agent_runner, "stream_write_section", write):
+            asyncio.run(run())
+            self.assertEqual(len(writes), 1)
+            checkpoint = Path(first.checkpoint_dir) / "pipeline_checkpoint.json"
+            saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+            self.assertEqual(saved["generated_sections"][0]["content"], content)
+            self.assertEqual(saved["sections"][0]["content"], content)
+            resumed = asyncio.run(run(resume=True))
+            self.assertEqual(len(writes), 1)
+            self.assertTrue(any("断点续生" in event.get("text", "") for event in resumed))
+            self.assertFalse((second.checkpoint_dir / "pipeline_checkpoint.json").exists())
+            self.assertFalse(Path(second.pipeline.telemetry_file).exists())
+            first.mark_data_changed()
+            asyncio.run(run(resume=True))
+            self.assertEqual(len(writes), 2)
+
+    def test_document_retains_word_toc_and_readable_citation_sources(self):
+        workspace, _ = self.account("teacher_word")
+        destination = workspace.pipeline.docx_exporter.export_report("Report", "Test", [{
+            "title": "Chapter", "level": 2,
+            "content": "教师[42人][^cell_scope]。",
+            "audit": {"citations": [{"cell_id": "cell_scope", "sheet_name": "Summary", "cell_ref": "A2"}]},
+        }], str(workspace.chart_dir))
+        doc = Document(destination)
+        text = "\n".join([paragraph.text for paragraph in doc.paragraphs] + [
+            cell.text for table in doc.tables for row in table.rows for cell in row.cells
+        ])
+        self.assertIn("42人", text)
+        self.assertIn("Summary!A2", text)
+        self.assertNotIn("cell_scope", text)
+        self.assertTrue(any("TOC" in node.text for node in doc.element.xpath("//w:instrText")))
+        self.assertTrue(any(paragraph.style.name == "Heading 2" for paragraph in doc.paragraphs))
+
+
+if __name__ == "__main__":
+    unittest.main()

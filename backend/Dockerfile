@@ -54,6 +54,6 @@ ENV PYTHONPATH=/app/backend
 EXPOSE 8008
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8008/api/health || exit 1
+  CMD curl -f http://localhost:8008/healthz || exit 1
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8008"]

@@ -1,5 +1,7 @@
 import sqlite3
 import os
+import re
+from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
 
 class CellLake:
@@ -13,7 +15,8 @@ class CellLake:
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._init_schema()
 
-    def _get_conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_conn(self):
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         try:
@@ -22,7 +25,11 @@ class CellLake:
             conn.execute("PRAGMA cache_size = -64000;")
         except Exception:
             pass
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_schema(self):
         with self._get_conn() as conn:
@@ -50,6 +57,15 @@ class CellLake:
         with self._get_conn() as conn:
             conn.cursor().execute("DELETE FROM cell_lake;")
             conn.commit()
+
+    def delete_sheet(self, file_name: str, sheet_name: str) -> int:
+        """只删除指定来源文件中的一个工作表，避免同名工作表相互影响。"""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM cell_lake WHERE file_name = ? AND sheet_name = ?",
+                (file_name, sheet_name),
+            )
+            return cursor.rowcount
 
     def insert_cells(self, cells: List[Dict[str, Any]], batch_size: int = 5000) -> int:
         """批量写入单元格记录（支持海量数据极速分块事务提交）"""
@@ -157,81 +173,52 @@ class CellLake:
             """)
             return [dict(r) for r in cursor.fetchall()]
 
+    def detect_school_metadata(self) -> Dict[str, str]:
+        """从已入湖单元格的指标表头识别学校信息，无需调用大模型。"""
+        field_aliases = {
+            "school_name": ("学校名称", "高校名称", "校名"),
+            "school_code": ("学校代码", "院校代码", "学校标识码"),
+            "school_type": ("办学类型", "学校类型"),
+            "school_nature": ("学校性质", "办学性质"),
+        }
+        metadata = {field: "" for field in field_aliases}
+        aliases = [alias for names in field_aliases.values() for alias in names]
+        conditions = " OR ".join("metric_path LIKE ?" for _ in aliases)
+
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT metric_path, raw_value FROM cell_lake
+                WHERE ({conditions}) AND TRIM(raw_value) <> ''
+                ORDER BY CASE
+                    WHEN file_name LIKE '%学校概况%' OR sheet_name LIKE '%学校概况%'
+                        OR file_name LIKE '%基本情况%' OR sheet_name LIKE '%基本情况%'
+                    THEN 0 ELSE 1 END,
+                    file_name, sheet_name, row_idx, col_idx
+                """,
+                [f"%{alias}%" for alias in aliases],
+            )
+            for row in rows:
+                # 只匹配末级指标，避免把“学校名称变更说明”等字段当成校名。
+                metric = row["metric_path"].split(">")[-1].strip()
+                metric = re.sub(r"[（(].*?[）)]", "", metric)
+                metric = re.sub(r"\s+", "", metric).rstrip(":：")
+                value = row["raw_value"].strip()
+                if not value or value in {"-", "--", "—", "无", "未填"}:
+                    continue
+                for field, names in field_aliases.items():
+                    if not metadata[field] and metric in names:
+                        metadata[field] = value
+                if all(metadata.values()):
+                    break
+        return metadata
+
     def count(self) -> int:
         """统计入湖单元格总量"""
         with self._get_conn() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM cell_lake")
             return cursor.fetchone()[0]
-
-    def detect_school_metadata(self) -> Dict[str, str]:
-        """从入库的单元格中自动探测学校元数据 (校名、代码、性质、类型等)"""
-        meta = {
-            "school_name": "",
-            "school_code": "",
-            "school_nature": "",
-            "school_type": ""
-        }
-        with self._get_conn() as conn:
-            cursor = conn.cursor()
-            # 1. 尝试直接按 metric_path 查找“学校名称”
-            cursor.execute("""
-            SELECT raw_value FROM cell_lake 
-            WHERE (metric_path LIKE '%学校名称%' OR metric_path LIKE '%高校名称%')
-              AND raw_value != '' AND raw_value NOT LIKE '%指标%'
-            LIMIT 1
-            """)
-            row = cursor.fetchone()
-            if row and row["raw_value"] and len(row["raw_value"].strip()) >= 3:
-                meta["school_name"] = row["raw_value"].strip()
-
-            # 2. 尝试查找院校代码
-            cursor.execute("""
-            SELECT raw_value FROM cell_lake 
-            WHERE (metric_path LIKE '%代码%' OR metric_path LIKE '%标识码%')
-              AND raw_value != ''
-            LIMIT 1
-            """)
-            row = cursor.fetchone()
-            if row and row["raw_value"]:
-                meta["school_code"] = row["raw_value"].strip()
-
-            # 3. 尝试查找办学类型
-            cursor.execute("""
-            SELECT raw_value FROM cell_lake 
-            WHERE (metric_path LIKE '%办学类型%' OR metric_path LIKE '%学校类型%')
-              AND raw_value != ''
-            LIMIT 1
-            """)
-            row = cursor.fetchone()
-            if row and row["raw_value"]:
-                meta["school_type"] = row["raw_value"].strip()
-
-            # 4. 尝试查找学校性质
-            cursor.execute("""
-            SELECT raw_value FROM cell_lake 
-            WHERE (metric_path LIKE '%学校性质%' OR metric_path LIKE '%办学性质%')
-              AND raw_value != ''
-            LIMIT 1
-            """)
-            row = cursor.fetchone()
-            if row and row["raw_value"]:
-                meta["school_nature"] = row["raw_value"].strip()
-
-            # 5. 若未匹配到校名，兜底模糊搜索大学/学院名称
-            if not meta["school_name"]:
-                cursor.execute("""
-                SELECT raw_value FROM cell_lake 
-                WHERE (raw_value LIKE '%大学' OR raw_value LIKE '%学院')
-                  AND length(raw_value) >= 4 AND length(raw_value) <= 25
-                  AND raw_value NOT LIKE '%指标%' AND raw_value NOT LIKE '%教育部%'
-                LIMIT 1
-                """)
-                row = cursor.fetchone()
-                if row and row["raw_value"]:
-                    meta["school_name"] = row["raw_value"].strip()
-
-        return meta
 
 
 
