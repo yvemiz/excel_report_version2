@@ -13,7 +13,6 @@ from app.core.audit_service import AuditService
 from app.core.docx_exporter import DocxExporter
 from app.core.excel_exporter import ExcelExporter
 from app.pipeline.agent_runner import PiAgentRunner
-from app.pipeline.dsml_guard import DSML_LEAK_MESSAGE, DSML_MARK, strip_dsml_tail
 from app.pipeline.jev_judge import JevJudge
 from app.pipeline.outline_planner import OutlinePlanner, CN_NUMS, DOMAINS
 
@@ -406,12 +405,12 @@ class ReportPipeline:
                                     "section_id": s_id,
                                     "chunk": chunk_event["text"]
                                 })
-                            elif chunk_event["type"] == "dsml_leak":
+                            elif chunk_event["type"] == "model_output_leak":
                                 full_content = ""
                                 await queue.put({
                                     "type": "section_reset",
                                     "section_id": s_id,
-                                    "message": chunk_event.get("message", DSML_LEAK_MESSAGE)
+                                    "message": chunk_event.get("message", "模型输出守卫已拦截本轮内容")
                                 })
                             elif chunk_event["type"] == "chart_generated":
                                 await queue.put({
@@ -421,13 +420,14 @@ class ReportPipeline:
                                 })
                             elif chunk_event["type"] == "done":
                                 raw_done = chunk_event.get("full_content", "")
-                                if DSML_MARK in raw_done:
+                                clean_done, leaked, leak_message = self.agent_runner.sanitize_output(raw_done)
+                                if leaked:
                                     await queue.put({
                                         "type": "section_reset",
                                         "section_id": s_id,
-                                        "message": DSML_LEAK_MESSAGE
+                                        "message": leak_message or "模型输出守卫已拦截本轮内容"
                                     })
-                                full_content = strip_dsml_tail(raw_done)
+                                full_content = clean_done
 
                         # --- Stage 4: 质检阶段 ---
                         await queue.put({
@@ -466,24 +466,25 @@ class ReportPipeline:
                                         "section_id": s_id,
                                         "chunk": chunk_event["text"]
                                     })
-                                elif chunk_event["type"] == "dsml_leak":
+                                elif chunk_event["type"] == "model_output_leak":
                                     revised_chunks = []
                                     full_content = ""
                                     await queue.put({
                                         "type": "section_reset",
                                         "section_id": s_id,
-                                        "message": chunk_event.get("message", DSML_LEAK_MESSAGE)
+                                        "message": chunk_event.get("message", "模型输出守卫已拦截本轮内容")
                                     })
                                 elif chunk_event["type"] == "done":
                                     raw_done = chunk_event.get("full_content", "")
-                                    if DSML_MARK in raw_done:
+                                    clean_done, leaked, leak_message = self.agent_runner.sanitize_output(raw_done)
+                                    if leaked:
                                         revised_chunks = []
                                         await queue.put({
                                             "type": "section_reset",
                                             "section_id": s_id,
-                                            "message": DSML_LEAK_MESSAGE
+                                            "message": leak_message or "模型输出守卫已拦截本轮内容"
                                         })
-                                    full_content = strip_dsml_tail(raw_done)
+                                    full_content = clean_done
 
                             if revised_chunks and not full_content:
                                 full_content = "".join(revised_chunks)
@@ -492,21 +493,21 @@ class ReportPipeline:
                             jev_res = await self.jev_judge.evaluate_section(s_title, retrieved_summary, full_content)
                             passed = audit_res["is_approved"] and jev_res["approved"]
 
-                        # 落库前最后一道 DSML 防线：即使上游事件解析漏掉，也不允许标记进入报告。
-                        if DSML_MARK in full_content:
-                            full_content = strip_dsml_tail(full_content)
+                        # 落库前最后一道厂商无关防线：即使事件流漏判，也不允许脏标记进入报告。
+                        full_content, output_leaked, output_leak_message = self.agent_runner.sanitize_output(full_content)
+                        if output_leaked:
                             await queue.put({
                                 "type": "section_reset",
                                 "section_id": s_id,
-                                "message": DSML_LEAK_MESSAGE
+                                "message": output_leak_message or "模型输出守卫已拦截本轮内容"
                             })
                             audit_res = self.audit_service.verify_markdown_text(full_content)
                             jev_res = {
                                 "logic_score": 0.0,
                                 "is_clean": False,
                                 "approved": False,
-                                "rejection_reason": DSML_LEAK_MESSAGE,
-                                "provider": "dsml-guard",
+                                "rejection_reason": output_leak_message or "模型输出守卫已拦截本轮内容",
+                                "provider": "output-guard",
                             }
                             passed = False
 
