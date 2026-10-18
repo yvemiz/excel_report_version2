@@ -17,6 +17,7 @@
 - [数据管理示例数据](screenshots/05_数据管理示例数据.png)
 - [生成完成但存在核验异常](screenshots/02_生成完成但存在核验异常.png)
 - [小节 2.1 核验异常详情](screenshots/04_小节2.1核验异常详情.png)
+- [Pi-Agent DSML 标记泄露](screenshots/09_Pi-Agent_DSML标记泄露.png)
 - [报告阅读页](screenshots/01_报告阅读页.png)
 - [引用来源穿透](screenshots/08_引用来源穿透.png)
 - [模型服务配置](screenshots/06_模型服务配置.png)
