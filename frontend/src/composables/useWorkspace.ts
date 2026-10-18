@@ -597,6 +597,10 @@ export function useWorkspace() {
             section.status = phase
           }
           if (typeof data.points_count === 'number') section.points_count = data.points_count
+        } else if (data.type === 'section_reset') {
+          const section = sections.value.find((item) => item.id === data.section_id)
+          if (section) section.content = ''
+          addLog(data.message || '检测到模型工具调用标记泄漏，已丢弃本轮输出', 'warning')
         } else if (data.type === 'section_chunk') {
           const section = sections.value.find((item) => item.id === data.section_id)
           if (section) section.content += data.chunk || ''

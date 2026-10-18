@@ -13,6 +13,7 @@ from app.core.audit_service import AuditService
 from app.core.docx_exporter import DocxExporter
 from app.core.excel_exporter import ExcelExporter
 from app.pipeline.agent_runner import PiAgentRunner
+from app.pipeline.dsml_guard import DSML_LEAK_MESSAGE, DSML_MARK, strip_dsml_tail
 from app.pipeline.jev_judge import JevJudge
 from app.pipeline.outline_planner import OutlinePlanner, CN_NUMS, DOMAINS
 
@@ -405,6 +406,13 @@ class ReportPipeline:
                                     "section_id": s_id,
                                     "chunk": chunk_event["text"]
                                 })
+                            elif chunk_event["type"] == "dsml_leak":
+                                full_content = ""
+                                await queue.put({
+                                    "type": "section_reset",
+                                    "section_id": s_id,
+                                    "message": chunk_event.get("message", DSML_LEAK_MESSAGE)
+                                })
                             elif chunk_event["type"] == "chart_generated":
                                 await queue.put({
                                     "type": "section_chart",
@@ -412,7 +420,14 @@ class ReportPipeline:
                                     "chart": chunk_event["chart"]
                                 })
                             elif chunk_event["type"] == "done":
-                                full_content = chunk_event["full_content"]
+                                raw_done = chunk_event.get("full_content", "")
+                                if DSML_MARK in raw_done:
+                                    await queue.put({
+                                        "type": "section_reset",
+                                        "section_id": s_id,
+                                        "message": DSML_LEAK_MESSAGE
+                                    })
+                                full_content = strip_dsml_tail(raw_done)
 
                         # --- Stage 4: 质检阶段 ---
                         await queue.put({
@@ -451,8 +466,24 @@ class ReportPipeline:
                                         "section_id": s_id,
                                         "chunk": chunk_event["text"]
                                     })
+                                elif chunk_event["type"] == "dsml_leak":
+                                    revised_chunks = []
+                                    full_content = ""
+                                    await queue.put({
+                                        "type": "section_reset",
+                                        "section_id": s_id,
+                                        "message": chunk_event.get("message", DSML_LEAK_MESSAGE)
+                                    })
                                 elif chunk_event["type"] == "done":
-                                    full_content = chunk_event["full_content"]
+                                    raw_done = chunk_event.get("full_content", "")
+                                    if DSML_MARK in raw_done:
+                                        revised_chunks = []
+                                        await queue.put({
+                                            "type": "section_reset",
+                                            "section_id": s_id,
+                                            "message": DSML_LEAK_MESSAGE
+                                        })
+                                    full_content = strip_dsml_tail(raw_done)
 
                             if revised_chunks and not full_content:
                                 full_content = "".join(revised_chunks)
@@ -460,6 +491,24 @@ class ReportPipeline:
                             audit_res = self.audit_service.verify_markdown_text(full_content)
                             jev_res = await self.jev_judge.evaluate_section(s_title, retrieved_summary, full_content)
                             passed = audit_res["is_approved"] and jev_res["approved"]
+
+                        # 落库前最后一道 DSML 防线：即使上游事件解析漏掉，也不允许标记进入报告。
+                        if DSML_MARK in full_content:
+                            full_content = strip_dsml_tail(full_content)
+                            await queue.put({
+                                "type": "section_reset",
+                                "section_id": s_id,
+                                "message": DSML_LEAK_MESSAGE
+                            })
+                            audit_res = self.audit_service.verify_markdown_text(full_content)
+                            jev_res = {
+                                "logic_score": 0.0,
+                                "is_clean": False,
+                                "approved": False,
+                                "rejection_reason": DSML_LEAK_MESSAGE,
+                                "provider": "dsml-guard",
+                            }
+                            passed = False
 
                         await queue.put({
                             "type": "section_stage",
