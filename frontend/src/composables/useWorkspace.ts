@@ -805,7 +805,13 @@ export function useWorkspace() {
         `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}&report_version_id=${encodeURIComponent(activeReportVersionId.value)}&skip_outline=true`,
       ),
     )
-    eventSource.onmessage = (event) => {
+    attachStreamHandlers()
+  }
+
+  function attachStreamHandlers() {
+    const stream = eventSource
+    if (!stream) return
+    stream.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
         if (data.type === 'error') throw new Error(data.message || '报告生成失败')
@@ -871,8 +877,44 @@ export function useWorkspace() {
         interruptStream(`生成事件异常：${errorText(error)}`)
       }
     }
-    eventSource.onerror = () =>
+    stream.onerror = () =>
       interruptStream('生成连接已断开。已接收的内容仍保留，请刷新状态并查看后端日志。')
+  }
+
+  async function retrySection(sectionId: string) {
+    if (isBusy.value || dataBusy.value || !activeReportVersionId.value) return
+    try {
+      const result = await requestJson<{ report_version_id: string }>(
+        `/api/reports/${encodeURIComponent(activeReportVersionId.value)}/sections/${encodeURIComponent(sectionId)}/retry`,
+        { method: 'POST' },
+      )
+      activeReportVersionId.value = result.report_version_id
+      const section = sections.value.find((item) => item.id === sectionId)
+      if (section) {
+        section.content = ''
+        section.audit = null
+        section.status = 'pending'
+      }
+      qualitySummary.value = null
+      exportFiles.value = {}
+      pipelineError.value = ''
+      taskState.value = 'running'
+      currentStage.value = 1
+      currentSectionId.value = sectionId
+      currentActivity.value = '正在重试本节'
+      addLog(`正在重试小节：${section?.section_title || sectionId}`)
+      navigate('generation')
+      eventSource?.close()
+      eventSource = new EventSource(
+        withDataset(
+          `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}&report_version_id=${encodeURIComponent(activeReportVersionId.value)}&skip_outline=true&resume=true`,
+        ),
+      )
+      attachStreamHandlers()
+    } catch (error) {
+      ElMessage.error(`重试小节失败：${errorText(error)}`)
+      addLog(`重试小节失败：${errorText(error)}`, 'error')
+    }
   }
 
   async function startPipeline() {
@@ -1046,6 +1088,7 @@ export function useWorkspace() {
     saveConfig,
     planOutline,
     confirmOutline,
+    retrySection,
     startPipeline,
     showSource,
     getCell,

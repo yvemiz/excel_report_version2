@@ -1,4 +1,5 @@
 """Account-scoped services for a single-school instance with isolated datasets."""
+import copy
 import json
 import logging
 import threading
@@ -141,6 +142,32 @@ class ReportWorkspace:
         if updated:
             self.version = updated
         return updated
+
+    def retry_section(self, section_id: str) -> "ReportWorkspace":
+        """Create a new report version that regenerates one section and reuses the rest."""
+        plan_ids = {item.get("id") for item in (self.pipeline.sections_plan or [])}
+        if section_id not in plan_ids:
+            raise HTTPException(status_code=404, detail="章节不存在于当前报告大纲")
+        dataset = self.dataset_workspace.dataset
+        if int(self.version.get("revision_no") or 0) != int(dataset.get("current_revision") or 0):
+            raise HTTPException(status_code=409, detail="数据已变化，请先重新生成报告，不能直接重试旧章节")
+        new_report = self.dataset_workspace.create_report(
+            school_name=self.pipeline.custom_school_name or self.owner.school_name,
+            status="running",
+        )
+        pipe = new_report.pipeline
+        pipe.sections_plan = copy.deepcopy(self.pipeline.sections_plan)
+        pipe.outline_jev_audit = copy.deepcopy(self.pipeline.outline_jev_audit)
+        pipe.generated_sections = [
+            copy.deepcopy(section)
+            for section in self.pipeline.generated_sections
+            if section.get("id") != section_id
+        ]
+        pipe.custom_school_name = self.pipeline.custom_school_name
+        pipe.current_stage = 1
+        pipe.data_changed = False
+        pipe.save_checkpoint()
+        return new_report
 
     def artifact_path(self, filename: str) -> Path:
         target = (self.export_dir / filename).resolve()

@@ -42,6 +42,32 @@ class DatasetWorkspaceTests(unittest.TestCase):
             self.assertEqual(report_b.snapshot()["dataset_id"], b["id"])
             ws.close()
 
+    def test_retry_section_reuses_other_sections(self):
+        with tempfile.TemporaryDirectory(prefix="retry_section_") as root:
+            auth = AuthStore(root)
+            user = auth.register("tester", "T", "longpassword123")
+            ws = Workspace(user["id"], root, auth)
+            dataset = ws.create_dataset("2026 评估", "2026")
+            report = ws.dataset(dataset["id"]).create_report("海南师范大学")
+            report.pipeline.custom_school_name = "海南师范大学"
+            report.pipeline.sections_plan = [
+                {"id": "s1", "title": "1.1 通过", "section_title": "1.1 通过"},
+                {"id": "s2", "title": "2.1 异常", "section_title": "2.1 异常"},
+                {"id": "s3", "title": "3.1 另一个异常", "section_title": "3.1 另一个异常"},
+            ]
+            report.pipeline.generated_sections = [
+                {"id": "s1", "title": "1.1 通过", "passed": True, "content": "ok"},
+                {"id": "s2", "title": "2.1 异常", "passed": False, "content": "bad"},
+                {"id": "s3", "title": "3.1 另一个异常", "passed": False, "content": "also bad"},
+            ]
+            report.pipeline.save_checkpoint()
+            retried = report.retry_section("s2")
+            self.assertNotEqual(retried.report_version_id, report.report_version_id)
+            self.assertEqual([item["id"] for item in retried.pipeline.sections_plan], ["s1", "s2", "s3"])
+            self.assertEqual([item["id"] for item in retried.pipeline.generated_sections], ["s1", "s3"])
+            self.assertEqual(retried.version["status"], "running")
+            ws.close()
+
     def test_quality_summary_flags_outline_and_failed_sections(self):
         with tempfile.TemporaryDirectory(prefix="quality_ws_") as root:
             auth = AuthStore(root)

@@ -3,7 +3,7 @@ import { DocumentAdd, Reading } from '@element-plus/icons-vue'
 import { stageDefinitions } from '../composables/useWorkspace'
 import type { Workspace } from '../composables/useWorkspace'
 import type { ReportSection } from '../types'
-import { citationSummary, sectionStatus } from '../utils/report'
+import { citationSummary, qualityState, sectionStatus } from '../utils/report'
 const { workspace: w } = defineProps<{ workspace: Workspace }>()
 </script>
 
@@ -183,11 +183,23 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
             }}</el-tag></template
           ></el-table-column
         >
-        <el-table-column label="操作" width="150" fixed="right"
+        <el-table-column label="操作" width="230" fixed="right"
           ><template #default="{ row }"
             ><el-button link type="primary" @click="w.showSection(row.id)">详情</el-button
             ><el-button link type="primary" :disabled="!row.content" @click="w.readSection(row.id)"
               >阅读</el-button
+            ><el-popconfirm
+              v-if="row.audit && qualityState(row as ReportSection) === 'warning'"
+              width="280"
+              title="重试会新建报告版本并重新调用模型，只重写这一小节，是否继续？"
+              confirm-button-text="重试"
+              cancel-button-text="取消"
+              @confirm="w.retrySection(row.id)"
+              ><template #reference
+                ><el-button link type="danger" :disabled="w.isBusy || w.connection !== 'online'"
+                  >重试本节</el-button
+                ></template
+              ></el-popconfirm
             ></template
           ></el-table-column
         >

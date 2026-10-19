@@ -134,6 +134,13 @@ class MergeCompatibilityTests(unittest.TestCase):
             resumed = asyncio.run(run(resume=True))
             self.assertEqual(len(writes), 1)
             self.assertTrue(any("断点续生" in event.get("text", "") for event in resumed))
+            # 页面已经生成过的异常小节也属于“已有正文”，只允许用户显式单节重试。
+            saved["generated_sections"][0]["passed"] = False
+            saved["sections"][0]["passed"] = False
+            checkpoint.write_text(json.dumps(saved, ensure_ascii=False), encoding="utf-8")
+            resumed_failed = asyncio.run(run(resume=True))
+            self.assertEqual(len(writes), 1)
+            self.assertTrue(any("断点续生" in event.get("text", "") for event in resumed_failed))
             self.assertFalse((second.checkpoint_dir / "pipeline_checkpoint.json").exists())
             self.assertFalse(Path(second.pipeline.telemetry_file).exists())
             first.mark_data_changed()

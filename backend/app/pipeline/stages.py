@@ -322,7 +322,9 @@ class ReportPipeline:
                     saved_cp = json.load(f_cp)
                     if not saved_cp.get("data_changed") and saved_cp.get("school_name") == active_school:
                         for item in saved_cp.get("generated_sections", saved_cp.get("sections", [])):
-                            if item.get("id") and item.get("content") and item.get("passed", True):
+                            # 已有正文的章节一律恢复，避免单节重试时顺带重跑其他异常小节；
+                            # 需要重做的异常小节由用户显式点击“重试本节”。
+                            if item.get("id") and item.get("content"):
                                 cached_sections[item["id"]] = item
                 print(f"[*] [断点续生] 成功从缓存读取到 {len(cached_sections)} 个已完成章节")
             except Exception as cp_err:

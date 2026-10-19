@@ -69,6 +69,23 @@ def report_snapshot(report_version_id: str, workspace: Workspace = Depends(get_w
     return workspace.report(report_version_id).snapshot()
 
 
+@router.post("/reports/{report_version_id}/sections/{section_id}/retry")
+def retry_report_section(
+    report_version_id: str,
+    section_id: str,
+    workspace: Workspace = Depends(get_mutable_workspace),
+):
+    """Create a new report version that regenerates only one section."""
+    report = workspace.report(report_version_id)
+    new_report = report.retry_section(section_id)
+    return {
+        "dataset_id": new_report.dataset_workspace.dataset_id,
+        "report_version_id": new_report.report_version_id,
+        "source_report_version_id": report_version_id,
+        "section_id": section_id,
+    }
+
+
 @router.get("/school")
 def get_school(workspace: Workspace = Depends(get_workspace)):
     return {"school": workspace.school_profile, "school_name": workspace.school_name}
