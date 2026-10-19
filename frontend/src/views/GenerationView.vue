@@ -38,18 +38,12 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
           ><el-form label-position="top"
             ><el-form-item label="评估学校名称"
               ><el-input
-                v-model="w.schoolName"
-                placeholder="填写本次报告的学校名称"
-                maxlength="100"
-                :disabled="w.isBusy"
-                clearable /></el-form-item
+                :model-value="w.schoolName || '请先在服务设置中填写学校名称'"
+                disabled /></el-form-item
           ></el-form>
           <div class="helper-text">
-            {{
-              w.detectedSchool
-                ? `从数据中识别：${w.detectedSchool}`
-                : '导入学校概况表后，可自动识别学校名称。'
-            }}
+            当前批次：{{ w.activeDatasetName }}
+            <template v-if="w.detectedSchool"> · 数据识别学校：{{ w.detectedSchool }}</template>
           </div></el-col
         >
         <el-col :xs="24" :lg="11"
@@ -65,7 +59,7 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
                 w.isBusy
                   ? '正在跟踪任务'
                   : w.generatedSections.length
-                    ? '重新生成报告'
+                    ? '生成新版本'
                     : '开始生成报告'
               }}</el-button
             >

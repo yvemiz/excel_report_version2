@@ -159,10 +159,11 @@ onBeforeUnmount(() => {
     <el-card shadow="never" class="reader-toolbar"
       ><div class="card-heading">
         <div>
-          <strong>{{ w.schoolName || '高校' }} · 本次报告</strong>
+          <strong>{{ w.schoolName || '高校' }} · {{ w.activeDatasetName }}</strong>
           <div class="card-subtitle">
             {{ w.generatedSections.length }} 个小节 ·
             {{ w.wordCount.toLocaleString() }} 字符<template v-if="w.isBusy"> · 正在更新</template>
+            <template v-if="w.activeReportVersionId"> · 报告版本 {{ w.activeReportVersionId.slice(-6) }}</template>
           </div>
         </div>
         <el-space wrap
@@ -224,7 +225,7 @@ onBeforeUnmount(() => {
           <div class="report-cover">
             <div class="eyebrow">本科教育教学质量评估</div>
             <h1>{{ w.schoolName || '高校' }}<br />教育教学质量发展检验报告</h1>
-            <p>基于本次导入数据生成 · {{ w.generatedSections.length }} 个小节</p>
+            <p>基于 {{ w.activeDatasetName }} 生成 · {{ w.generatedSections.length }} 个小节</p>
             <el-tag type="info" effect="plain">{{
               w.isBusy ? '生成中的报告' : '已生成报告'
             }}</el-tag>

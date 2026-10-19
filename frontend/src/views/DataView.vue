@@ -77,7 +77,7 @@ async function submitFiles() {
             <div class="el-upload__text">将 Excel 文件拖到这里，或<em>点击选择文件</em></div>
             <template #tip
               ><div class="el-upload__tip">
-                选择后点击“上传并解析”，文件将追加到当前数据目录；同名工作表可能更新已有数据。
+                选择后点击“上传并解析”，文件会进入当前批次；同一批次内同名文件会被拒绝，请新建批次或先删除旧文件。
               </div></template
             >
           </el-upload>
@@ -124,9 +124,9 @@ async function submitFiles() {
       <template #header
         ><div class="card-heading">
           <div>
-            <span>已入库数据目录</span>
+            <span>当前批次数据目录</span>
             <div class="card-subtitle">
-              {{ w.fileCount }} 个文件 · {{ w.sheets.length }} 个工作表 ·
+              {{ w.activeDatasetName }} · {{ w.fileCount }} 个文件 · {{ w.sheets.length }} 个工作表 ·
               {{ w.totalCells.toLocaleString() }} 个数据单元格
             </div>
           </div>
@@ -143,7 +143,7 @@ async function submitFiles() {
                 w.isBusy || (w.dataBusy && !w.clearingData) || (!w.sheets.length && !w.totalCells)
               "
               @click="w.clearAllData"
-              >清空全部</el-button
+              >清空当前批次</el-button
             >
           </el-space>
         </div></template

@@ -14,6 +14,7 @@ from app.core.workspaces import Workspace, WorkspaceManager, get_workspace
 from app.api.routes_auth import router as auth_router
 from app.api.routes_upload import router as upload_router
 from app.api.routes_pipeline import router as pipeline_router
+from app.api.routes_datasets import router as datasets_router
 from app.api.routes_export import router as export_router, static_router
 
 
@@ -49,7 +50,7 @@ def create_app(data_dir=None, allowed_origins=None):
         CORSMiddleware, allow_origins=origins, allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["Content-Type"],
     )
-    for router in (auth_router, upload_router, pipeline_router, export_router, static_router):
+    for router in (auth_router, datasets_router, upload_router, pipeline_router, export_router, static_router):
         app.include_router(router)
 
     @app.get("/healthz")

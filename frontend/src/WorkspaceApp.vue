@@ -15,6 +15,7 @@ import {
   UserFilled,
   ArrowDown,
   SwitchButton,
+  Plus,
 } from '@element-plus/icons-vue'
 import { pages, useWorkspace } from './composables/useWorkspace'
 import type { PageId, AuthUser } from './types'
@@ -41,6 +42,14 @@ const views = {
 }
 const connectionText = computed(
   () => ({ connecting: '连接中', online: '服务已连接', offline: '服务连接异常' })[w.connection],
+)
+const schoolMismatch = computed(
+  () =>
+    Boolean(
+      w.detectedSchool &&
+        w.schoolProfile.school_name &&
+        w.detectedSchool !== w.schoolProfile.school_name,
+    ),
 )
 const sheetFields = computed(() =>
   (w.selectedSheet?.columns || w.selectedSheet?.headers || []).map((name, index) => ({
@@ -173,6 +182,42 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
             show-icon
             class="connection-alert"
           />
+          <div class="dataset-strip">
+            <div class="dataset-strip-label">
+              <el-icon><FolderOpened /></el-icon>
+              <span>当前批次</span>
+            </div>
+            <el-select
+              :model-value="w.activeDatasetId"
+              :loading="w.datasetsLoading"
+              class="dataset-strip-select"
+              placeholder="选择评估批次"
+              @change="w.switchDataset"
+            >
+              <el-option
+                v-for="dataset in w.datasets"
+                :key="dataset.id"
+                :value="dataset.id"
+                :label="`${dataset.name}${dataset.kind === 'demo' ? '（示例）' : ''}`"
+              >
+                <div class="dataset-option">
+                  <span>{{ dataset.name }}</span>
+                  <small>{{ dataset.academic_year || dataset.kind }} · {{ dataset.cell_count.toLocaleString() }} 个单元格</small>
+                </div>
+              </el-option>
+            </el-select>
+            <el-tag v-if="w.activeDataset?.kind === 'demo'" type="warning" effect="plain">示例数据</el-tag>
+            <el-button text :icon="Plus" @click="w.datasetDialog = true">新建评估批次</el-button>
+          </div>
+          <el-alert
+            v-if="schoolMismatch"
+            title="当前批次数据与学校配置不一致"
+            :description="`当前批次数据识别为“${w.detectedSchool}”，学校配置为“${w.schoolProfile.school_name}”。请切换到正确批次；正式报告生成已被阻止。`"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="connection-alert"
+          />
           <el-alert
             v-if="w.reportDataChanged"
             title="入库数据已变化，请重新生成报告"
@@ -204,6 +249,28 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
     ></el-drawer
   >
   <el-dialog
+    v-model="w.datasetDialog"
+    title="新建评估批次"
+    width="min(520px, calc(100vw - 32px))"
+    :close-on-click-modal="!w.creatingDataset"
+    :close-on-press-escape="!w.creatingDataset"
+    :show-close="!w.creatingDataset"
+  >
+    <el-form label-position="top" @submit.prevent="w.createDataset">
+      <el-form-item label="批次名称">
+        <el-input v-model="w.datasetForm.name" placeholder="例如 2026 年本科教学评估" clearable />
+      </el-form-item>
+      <el-form-item label="年度 / 周期（可选）">
+        <el-input v-model="w.datasetForm.academicYear" placeholder="例如 2026" clearable />
+      </el-form-item>
+    </el-form>
+    <div class="helper-text">仅用于海南师范大学不同年度或评估批次，不会切换学校。</div>
+    <template #footer>
+      <el-button :disabled="w.creatingDataset" @click="w.datasetDialog = false">取消</el-button>
+      <el-button type="primary" :loading="w.creatingDataset" @click="w.createDataset">创建并切换</el-button>
+    </template>
+  </el-dialog>
+  <el-dialog
     v-model="w.folderDialog"
     title="导入本地报表目录"
     width="min(560px, calc(100vw - 32px))"
@@ -213,7 +280,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
   >
     <el-alert
       title="使用运行后端服务的计算机上的路径"
-      description="支持读取目录中的 .xls 与 .xlsx 文件。默认追加数据，同名工作表可能更新已有内容。"
+      :description="`将导入到当前批次：${w.activeDatasetName}。同名文件会被拒绝，请先删除旧文件或新建批次。`"
       type="info"
       :closable="false"
       show-icon

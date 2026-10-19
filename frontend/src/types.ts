@@ -23,6 +23,31 @@ export type SectionStatus =
   | 'warning'
 export type TagType = 'primary' | 'success' | 'warning' | 'info' | 'danger'
 
+
+export interface DatasetInfo {
+  id: string
+  dataset_id?: string
+  name: string
+  academic_year: string
+  kind: 'legacy' | 'real' | 'demo'
+  is_default: number | boolean
+  current_revision: number
+  status: string
+  cell_count: number
+  table_count: number
+  report_count: number
+  latest_report_id: string
+  latest_report_status: string
+  detected_school_name?: string
+  created_at?: number
+  updated_at?: number
+}
+
+export interface SchoolProfile {
+  school_name: string
+  school_code: string
+}
+
 export interface SheetInfo {
   table_name: string
   file_name: string
@@ -115,6 +140,16 @@ export interface PipelineSnapshot {
   sections_plan: Partial<ReportSection>[]
   generated_sections: GeneratedSection[]
   export_files: ExportFiles
+  dataset_id?: string
+  dataset_name?: string
+  dataset_kind?: string
+  dataset_academic_year?: string
+  current_revision?: number
+  report_version_id?: string
+  report_version_status?: string
+  revision_no?: number
+  report_created_at?: number | null
+  report_completed_at?: number | null
 }
 
 export interface CellInfo {

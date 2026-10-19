@@ -32,7 +32,8 @@ class ReportPipeline:
         excel_exporter: ExcelExporter,
         agent_runner: PiAgentRunner,
         jev_judge: JevJudge,
-        checkpoint_dir: Optional[str] = None
+        checkpoint_dir: Optional[str] = None,
+        export_url_prefix: str = "/api/exports",
     ):
         self.cell_lake = cell_lake
         self.duckdb_engine = duckdb_engine
@@ -44,6 +45,7 @@ class ReportPipeline:
         self.jev_judge = jev_judge
         self.outline_planner = OutlinePlanner(self.duckdb_engine)
         self.checkpoint_dir = checkpoint_dir or os.path.join(settings.DATA_DIR, "checkpoints")
+        self.export_url_prefix = export_url_prefix.rstrip("/")
         self.telemetry_file = os.path.join(os.path.dirname(self.checkpoint_dir), "telemetry_traces.jsonl")
 
         # 流水线全局状态
@@ -625,8 +627,8 @@ class ReportPipeline:
         self.export_files = {
             "docx": docx_path,
             "xlsx": excel_path,
-            "docx_url": f"/api/exports/{os.path.basename(docx_path)}",
-            "xlsx_url": f"/api/exports/{os.path.basename(excel_path)}"
+            "docx_url": f"{self.export_url_prefix}/{os.path.basename(docx_path)}",
+            "xlsx_url": f"{self.export_url_prefix}/{os.path.basename(excel_path)}"
         }
         self.save_checkpoint()
 

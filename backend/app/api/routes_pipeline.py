@@ -3,7 +3,7 @@ import asyncio
 import logging
 from typing import Literal, Optional
 from urllib.parse import urlsplit
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from app.core.workspaces import Workspace, get_workspace, get_mutable_workspace, begin_operation
@@ -53,26 +53,54 @@ async def update_llm_config(cfg: ApiKeyConfig, workspace: Workspace = Depends(ge
     return {"success": True, "has_api_key": bool(config["api_key"]), "message": f"配置已保存，当前引擎：{mode_name}"}
 
 @router.get("/status")
-async def get_pipeline_status(workspace: Workspace = Depends(get_workspace)):
-    """获取当前流水线执行状态与已生成的报告小节"""
-    return workspace.snapshot()
+async def get_pipeline_status(dataset_id: Optional[str] = Query(None), workspace: Workspace = Depends(get_workspace)):
+    """获取当前数据集最新报告版本的执行状态与章节结果"""
+    return workspace.snapshot(dataset_id)
 
 @router.get("/stream")
-async def pipeline_sse(school_name: Optional[str] = None, resume: bool = False, workspace: Workspace = Depends(get_workspace)):
-    """SSE 流式事件接口（完美兼容各种浏览器与代理环境）"""
-    if not workspace.cell_lake.count():
-        raise HTTPException(status_code=400, detail="请先上传当前账号的 Excel 报表")
+async def pipeline_sse(
+    school_name: Optional[str] = None,
+    resume: bool = False,
+    dataset_id: Optional[str] = Query(None),
+    workspace: Workspace = Depends(get_workspace),
+):
+    """SSE 流式事件接口；每次新生成创建独立的报告版本，不覆盖旧版本。"""
+    dataset = workspace.dataset(dataset_id)
+    if not dataset.cell_lake.count():
+        raise HTTPException(status_code=400, detail="请先为当前数据集上传 Excel 报表")
+    detected_school = dataset.cell_lake.detect_school_metadata().get("school_name", "").strip()
+    configured_school = workspace.school_name.strip()
+    if detected_school and configured_school and detected_school != configured_school:
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前批次数据识别为“{detected_school}”，与学校配置“{configured_school}”不一致，请切换到正确批次",
+        )
+
     begin_operation(workspace)
+    try:
+        report = None
+        if resume:
+            latest = dataset.latest_report()
+            if latest and latest.version.get("status") != "completed":
+                report = latest
+        if report is None:
+            report = dataset.create_report(school_name=school_name or workspace.school_name, status="running")
+    except Exception:
+        workspace.operation_lock.release()
+        raise
     async def event_generator():
         try:
-            async for event in workspace.pipeline.execute_pipeline(school_name=school_name, resume=resume):
+            yield f"data: {json.dumps({'type': 'report_started', 'dataset_id': dataset.dataset_id, 'report_version_id': report.report_version_id}, ensure_ascii=False)}\n\n"
+            async for event in report.pipeline.execute_pipeline(school_name=school_name, resume=resume):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 await asyncio.sleep(0.01)
-        except Exception:
+            report.mark_status("completed" if report.pipeline.current_stage >= 5 else "interrupted")
+        except Exception as exc:
             logging.getLogger(__name__).exception("Report generation failed for user %s", workspace.user_id)
+            report.mark_status("failed", str(exc))
             yield 'data: {"type":"error","message":"报告生成失败，请查看后端运行日志"}\n\n'
         finally:
-            workspace.pipeline.save_checkpoint()
+            report.pipeline.save_checkpoint()
             workspace.operation_lock.release()
     return StreamingResponse(
         event_generator(), media_type="text/event-stream",
@@ -91,15 +119,37 @@ async def pipeline_websocket(websocket: WebSocket, workspace: Workspace = Depend
 
             if action == "start":
                 req_school = data.get("school_name")
-                if not workspace.cell_lake.count() or not workspace.operation_lock.acquire(blocking=False):
+                dataset = workspace.dataset(data.get("dataset_id"))
+                if not dataset.cell_lake.count() or not workspace.operation_lock.acquire(blocking=False):
                     await websocket.send_json({"type": "error", "message": "请先导入数据并等待当前任务结束"})
                     continue
+                detected_school = dataset.cell_lake.detect_school_metadata().get("school_name", "").strip()
+                configured_school = workspace.school_name.strip()
+                if detected_school and configured_school and detected_school != configured_school:
+                    workspace.operation_lock.release()
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"当前批次数据识别为“{detected_school}”，与学校配置“{configured_school}”不一致",
+                    })
+                    continue
+                report = None
+                if bool(data.get("resume", False)):
+                    latest = dataset.latest_report()
+                    if latest and latest.version.get("status") != "completed":
+                        report = latest
+                if report is None:
+                    report = dataset.create_report(school_name=req_school or workspace.school_name, status="running")
                 try:
-                    async for event in workspace.pipeline.execute_pipeline(school_name=req_school, resume=bool(data.get("resume", False))):
+                    await websocket.send_text(json.dumps({
+                        "type": "report_started", "dataset_id": dataset.dataset_id,
+                        "report_version_id": report.report_version_id,
+                    }, ensure_ascii=False))
+                    async for event in report.pipeline.execute_pipeline(school_name=req_school, resume=bool(data.get("resume", False))):
                         await websocket.send_text(json.dumps(event, ensure_ascii=False))
                         await asyncio.sleep(0.01)
+                    report.mark_status("completed" if report.pipeline.current_stage >= 5 else "interrupted")
                 finally:
-                    workspace.pipeline.save_checkpoint()
+                    report.pipeline.save_checkpoint()
                     workspace.operation_lock.release()
 
             elif action == "ping":
@@ -115,15 +165,21 @@ async def pipeline_websocket(websocket: WebSocket, workspace: Workspace = Depend
             pass
 
 @router.get("/balance")
-async def get_deepseek_balance(workspace: Workspace = Depends(get_workspace)):
+async def get_deepseek_balance(dataset_id: Optional[str] = Query(None), workspace: Workspace = Depends(get_workspace)):
     """实时查询 DeepSeek API 余额与 Token 消耗统计 (Inspired by pi-deepseek-balance)"""
     from app.core.telemetry_service import DeepSeekBalanceMonitor
+    report = workspace.dataset(dataset_id).latest_report()
+    if report is None:
+        raise HTTPException(status_code=404, detail="当前数据集还没有报告版本")
     return await DeepSeekBalanceMonitor.fetch_balance(
-        workspace.pipeline.agent_runner.api_key, trace_file=workspace.pipeline.telemetry_file,
+        report.pipeline.agent_runner.api_key, trace_file=report.pipeline.telemetry_file,
     )
 
 @router.get("/telemetry")
-async def get_pipeline_telemetry(workspace: Workspace = Depends(get_workspace)):
+async def get_pipeline_telemetry(dataset_id: Optional[str] = Query(None), workspace: Workspace = Depends(get_workspace)):
     """获取全链路可观测性时延、Token与Jev质检得分汇总"""
     from app.core.telemetry_service import TelemetryService
-    return TelemetryService.get_summary(trace_file=workspace.pipeline.telemetry_file)
+    report = workspace.dataset(dataset_id).latest_report()
+    if report is None:
+        raise HTTPException(status_code=404, detail="当前数据集还没有报告版本")
+    return TelemetryService.get_summary(trace_file=report.pipeline.telemetry_file)

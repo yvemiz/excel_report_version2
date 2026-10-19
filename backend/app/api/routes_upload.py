@@ -3,27 +3,29 @@ import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
 from app.config import settings
 from app.core.stc_parser import STCParser
 from app.core.workspaces import Workspace, get_workspace, get_mutable_workspace
 
 router = APIRouter(prefix="/api", tags=["Upload & Data Ingestion"])
 
-def validate_import_path(path, workspace: Workspace):
+def validate_import_path(path, workspace: Workspace, dataset=None):
     resolved = Path(path).resolve()
-    if resolved.is_relative_to(workspace.upload_dir.resolve()):
+    allowed_upload = dataset.upload_dir.resolve() if dataset is not None else workspace.upload_dir.resolve()
+    if resolved.is_relative_to(allowed_upload):
         return
     if resolved.is_relative_to(workspace.data_root) or workspace.data_root.is_relative_to(resolved):
         raise HTTPException(status_code=403, detail="不能导入系统数据目录或其他账号的文件，请使用独立的报表文件夹")
 
 
 @router.post("/upload")
-async def upload_excel(files: List[UploadFile] = File(...), workspace: Workspace = Depends(get_mutable_workspace)):
+async def upload_excel(files: List[UploadFile] = File(...), dataset_id: Optional[str] = Query(None), workspace: Workspace = Depends(get_mutable_workspace)):
     """上传一个或多个 Excel 文件并执行 STC 解析、Cell Lake 入库和 DuckDB 注册"""
     if not files:
         raise HTTPException(status_code=400, detail="未上传任何文件")
-    cell_lake_instance, duckdb_instance = workspace.cell_lake, workspace.duckdb
+    dataset = workspace.dataset(dataset_id)
+    cell_lake_instance, duckdb_instance = dataset.cell_lake, dataset.duckdb
 
     uploaded_summary = []
     total_cells_added = 0
@@ -36,14 +38,19 @@ async def upload_excel(files: List[UploadFile] = File(...), workspace: Workspace
         if ext not in [".xls", ".xlsx"]:
             continue
 
-        save_path = workspace.upload_dir / filename
+        save_path = dataset.upload_dir / filename
+        if save_path.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"当前数据集已存在同名文件“{filename}”，请先删除旧文件或改用新的批次数据集",
+            )
         with open(save_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
         # STC 复合表头解析
         sheets_data = STCParser.parse_file(save_path)
         if sheets_data:
-            workspace.mark_data_changed()
+            dataset.mark_data_changed()
         for s in sheets_data:
             c_count = cell_lake_instance.insert_cells(s["cells"])
             total_cells_added += c_count
@@ -63,18 +70,22 @@ async def upload_excel(files: List[UploadFile] = File(...), workspace: Workspace
         "success": True,
         "message": f"成功解析 {len(uploaded_summary)} 个工作表，录入 {total_cells_added} 个单元格物理坐标",
         "sheets": uploaded_summary,
-        "total_cells": cell_lake_instance.count()
+        "total_cells": cell_lake_instance.count(),
+        "dataset_id": dataset.dataset_id,
+        "dataset_name": dataset.dataset.get("name", ""),
     }
 
 @router.post("/load_example_data")
 async def load_example_data(workspace: Workspace = Depends(get_mutable_workspace)):
     """一键加载 example/ 目录下的 8 个高校真实报表数据"""
     example_dir = os.path.join(os.path.dirname(settings.BASE_DIR), "example")
-    cell_lake_instance, duckdb_instance = workspace.cell_lake, workspace.duckdb
+    demo = workspace.ensure_demo_dataset()
+    dataset = workspace.dataset(demo["id"])
+    cell_lake_instance, duckdb_instance = dataset.cell_lake, dataset.duckdb
     if not os.path.exists(example_dir):
         raise HTTPException(status_code=404, detail="example 目录不存在")
 
-    workspace.mark_data_changed()
+    dataset.mark_data_changed()
     cell_lake_instance.clear()
     duckdb_instance.clear()
     loaded = []
@@ -101,13 +112,16 @@ async def load_example_data(workspace: Workspace = Depends(get_mutable_workspace
         "success": True,
         "message": f"成功加载 8 个高校状态报表，共计 {total_cells} 个单元格坐标进入 Cell Lake",
         "sheets": loaded,
-        "total_cells": cell_lake_instance.count()
+        "total_cells": cell_lake_instance.count(),
+        "dataset_id": dataset.dataset_id,
+        "dataset_name": dataset.dataset.get("name", ""),
     }
 
 @router.get("/tables")
-async def get_tables(workspace: Workspace = Depends(get_workspace)):
+async def get_tables(dataset_id: Optional[str] = Query(None), workspace: Workspace = Depends(get_workspace)):
     """获取 DuckDB 目录层与数据指标列表及嗅探到的学校元数据"""
-    cell_lake_instance, duckdb_instance = workspace.cell_lake, workspace.duckdb
+    dataset = workspace.dataset(dataset_id)
+    cell_lake_instance, duckdb_instance = dataset.cell_lake, dataset.duckdb
     school_meta = cell_lake_instance.detect_school_metadata()
     cell_counts = {
         (item["file_name"], item["sheet_name"]): item["cell_count"]
@@ -120,24 +134,28 @@ async def get_tables(workspace: Workspace = Depends(get_workspace)):
         ],
         "total_cells": cell_lake_instance.count(),
         "school_metadata": school_meta,
-        "school_name": school_meta.get("school_name", "")
+        "school_name": school_meta.get("school_name", ""),
+        "dataset_id": dataset.dataset_id,
+        "dataset_name": dataset.dataset.get("name", ""),
+        "current_revision": dataset.dataset.get("current_revision", 1),
     }
 
 @router.delete("/tables")
-def clear_tables(workspace: Workspace = Depends(get_mutable_workspace)):
-    """清空当前账号入库数据，不删除账号、模型配置或已生成报告。"""
-    return workspace.delete_data()
+def clear_tables(dataset_id: Optional[str] = Query(None), workspace: Workspace = Depends(get_mutable_workspace)):
+    """清空当前数据集入库数据，不删除账号、模型配置或已生成报告。"""
+    return workspace.delete_data(dataset_id=dataset_id)
 
 
 @router.delete("/tables/{table_name}")
-def delete_table(table_name: str, workspace: Workspace = Depends(get_mutable_workspace)):
-    """删除当前账号目录中的单个工作表及其来源单元格。"""
-    return workspace.delete_data(table_name)
+def delete_table(table_name: str, dataset_id: Optional[str] = Query(None), workspace: Workspace = Depends(get_mutable_workspace)):
+    """删除当前数据集中的单个工作表及其来源单元格。"""
+    return workspace.delete_data(table_name, dataset_id=dataset_id)
 
 @router.get("/cell/{cell_id}")
-async def get_cell_detail(cell_id: str, workspace: Workspace = Depends(get_workspace)):
+async def get_cell_detail(cell_id: str, dataset_id: Optional[str] = Query(None), workspace: Workspace = Depends(get_workspace)):
     """根据 cell_id 查询单元格物理坐标与值（用于前端 Hover 穿透气泡）"""
-    cell = workspace.cell_lake.get_cell(cell_id)
+    dataset = workspace.dataset(dataset_id)
+    cell = dataset.cell_lake.get_cell(cell_id)
     if not cell:
         raise HTTPException(status_code=404, detail="未找到该单元格记录")
     return {
@@ -149,6 +167,7 @@ class ScanDirectoryRequest(BaseModel):
     directory_path: str
     recursive: bool = True
     clear_existing: bool = True
+    dataset_id: Optional[str] = None
 
 @router.post("/scan_directory")
 async def scan_directory_data(req: ScanDirectoryRequest, workspace: Workspace = Depends(get_mutable_workspace)):
@@ -159,18 +178,30 @@ async def scan_directory_data(req: ScanDirectoryRequest, workspace: Workspace = 
     """
     import asyncio
     dir_path = req.directory_path.strip()
-    cell_lake_instance, duckdb_instance = workspace.cell_lake, workspace.duckdb
+    dataset = workspace.dataset(req.dataset_id)
+    cell_lake_instance, duckdb_instance = dataset.cell_lake, dataset.duckdb
     if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
         raise HTTPException(status_code=400, detail=f"指定的目录不存在或不是文件夹: {dir_path}")
 
-    validate_import_path(dir_path, workspace)
+    validate_import_path(dir_path, workspace, dataset)
     parsed_sheets = await asyncio.to_thread(
         STCParser.parse_directory, dir_path, recursive=req.recursive,
-        file_validator=lambda path: validate_import_path(path, workspace),
+        file_validator=lambda path: validate_import_path(path, workspace, dataset),
     )
+    if parsed_sheets and not req.clear_existing:
+        existing = {(item["file_name"], item["sheet_name"]) for item in cell_lake_instance.get_tables_summary()}
+        conflicts = [
+            f"{item['file_name']} / {item['sheet_name']}"
+            for item in parsed_sheets if (item["file_name"], item["sheet_name"]) in existing
+        ]
+        if conflicts:
+            raise HTTPException(
+                status_code=409,
+                detail="当前数据集已存在同名工作表，请先清空数据或改用新的批次数据集：" + "、".join(conflicts[:5]),
+            )
     if not parsed_sheets:
         return {"success": False, "message": "该目录下未扫描到任何 .xls 或 .xlsx 文件", "total_files": 0}
-    workspace.mark_data_changed()
+    dataset.mark_data_changed()
     if req.clear_existing:
         cell_lake_instance.clear()
         duckdb_instance.clear()
@@ -210,6 +241,9 @@ async def scan_directory_data(req: ScanDirectoryRequest, workspace: Workspace = 
         "total_cells_lake": cell_lake_instance.count(),
         "school_metadata": detected_school,
         "school_name": detected_school.get("school_name", ""),
+        "dataset_id": dataset.dataset_id,
+        "dataset_name": dataset.dataset.get("name", ""),
+        "current_revision": dataset.dataset.get("current_revision", 1),
         "workbook_inspection": {
             "overall_health_rate": inspection_res.get("overall_health_rate", 100.0),
             "healthy_files": inspection_res.get("healthy_files", len(unique_files)),

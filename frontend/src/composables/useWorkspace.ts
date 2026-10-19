@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type {
   CellInfo,
+  DatasetInfo,
   ExecutionLog,
   ExportFiles,
   ModelConfig,
@@ -9,6 +10,7 @@ import type {
   PageId,
   PipelineSnapshot,
   ReportSection,
+  SchoolProfile,
   SheetInfo,
 } from '../types'
 import { qualityState } from '../utils/report'
@@ -68,6 +70,15 @@ export function useWorkspace() {
   const schoolName = ref('')
   const detectedSchool = ref('')
   const schoolMetadata = ref<Record<string, string>>({})
+  const schoolProfile = ref<SchoolProfile>({ school_name: '', school_code: '' })
+  const datasets = ref<DatasetInfo[]>([])
+  const activeDatasetId = ref('')
+  const activeReportVersionId = ref('')
+  const datasetsLoading = ref(false)
+  const creatingDataset = ref(false)
+  const schoolSaving = ref(false)
+  const datasetDialog = ref(false)
+  const datasetForm = reactive({ name: '', academicYear: '' })
   const sheets = ref<SheetInfo[]>([])
   const totalCells = ref(0)
   const sections = ref<ReportSection[]>([])
@@ -119,6 +130,10 @@ export function useWorkspace() {
   let statusInFlight = false
   let disposed = false
 
+  const activeDataset = computed(
+    () => datasets.value.find((dataset) => dataset.id === activeDatasetId.value) || null,
+  )
+  const activeDatasetName = computed(() => activeDataset.value?.name || '未选择批次')
   const isBusy = computed(() => taskState.value === 'running' || taskState.value === 'observing')
   const dataBusy = computed(
     () =>
@@ -182,6 +197,12 @@ export function useWorkspace() {
     ]
   })
 
+  function withDataset(path: string) {
+    if (!activeDatasetId.value) return path
+    const separator = path.includes('?') ? '&' : '?'
+    return `${path}${separator}dataset_id=${encodeURIComponent(activeDatasetId.value)}`
+  }
+
   function addLog(message: string, level: ExecutionLog['level'] = 'info') {
     executionLogs.value.push({
       time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
@@ -201,6 +222,131 @@ export function useWorkspace() {
     activePage.value = pages.some((item) => item.id === page) ? page : 'overview'
   }
 
+  async function fetchDatasets() {
+    datasetsLoading.value = true
+    try {
+      const data = await requestJson<{ datasets: DatasetInfo[]; default_dataset_id: string }>(
+        '/api/datasets',
+        { signal: AbortSignal.timeout(15000) },
+      )
+      datasets.value = data.datasets || []
+      const stored = window.localStorage.getItem('active_dataset_id') || ''
+      const preferred = activeDatasetId.value || stored || data.default_dataset_id
+      activeDatasetId.value =
+        datasets.value.find((item) => item.id === preferred)?.id ||
+        data.default_dataset_id ||
+        datasets.value[0]?.id ||
+        ''
+      if (activeDatasetId.value)
+        window.localStorage.setItem('active_dataset_id', activeDatasetId.value)
+      return true
+    } catch (error) {
+      tablesError.value = `读取批次列表失败：${errorText(error)}`
+      return false
+    } finally {
+      datasetsLoading.value = false
+    }
+  }
+
+  async function fetchSchoolProfile() {
+    try {
+      const data = await requestJson<{ school: SchoolProfile }>('/api/school', {
+        signal: AbortSignal.timeout(15000),
+      })
+      schoolProfile.value = data.school || { school_name: '', school_code: '' }
+      if (data.school?.school_name) schoolName.value = data.school.school_name
+      return true
+    } catch (error) {
+      configError.value = `读取学校配置失败：${errorText(error)}`
+      return false
+    }
+  }
+
+  async function saveSchoolProfile() {
+    if (!schoolProfile.value.school_name.trim()) {
+      ElMessage.warning('请填写学校名称')
+      return
+    }
+    schoolSaving.value = true
+    try {
+      const data = await requestJson<{ school: SchoolProfile }>('/api/school', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          school_name: schoolProfile.value.school_name.trim(),
+          school_code: schoolProfile.value.school_code.trim(),
+        }),
+      })
+      schoolProfile.value = data.school
+      schoolName.value = data.school.school_name
+      ElMessage.success('学校信息已保存')
+    } catch (error) {
+      ElMessage.error(`保存学校信息失败：${errorText(error)}`)
+    } finally {
+      schoolSaving.value = false
+    }
+  }
+
+  async function switchDataset(id: string) {
+    if (!id || id === activeDatasetId.value) return
+    if (isBusy.value) {
+      ElMessage.warning('当前有报告任务，结束后再切换批次')
+      return
+    }
+    activeDatasetId.value = id
+    window.localStorage.setItem('active_dataset_id', id)
+    const selected = datasets.value.find((dataset) => dataset.id === id)
+    if (selected?.kind === 'real') {
+      try {
+        await requestJson(`/api/datasets/${encodeURIComponent(id)}/default`, { method: 'POST' })
+      } catch {
+        // Switching the local view must not fail just because the fallback default could not be updated.
+      }
+    }
+    cellCache.clear()
+    sourceRequest++
+    sheets.value = []
+    totalCells.value = 0
+    sections.value = []
+    exportFiles.value = {}
+    outlineAudit.value = null
+    reportDataChanged.value = false
+    taskState.value = 'idle'
+    currentStage.value = 0
+    currentSectionId.value = ''
+    readerSectionId.value = ''
+    sourceDrawer.value = false
+    sourceCell.value = null
+    executionLogs.value = []
+    await refreshAll()
+  }
+
+  async function createDataset() {
+    const name = datasetForm.name.trim()
+    if (!name) {
+      ElMessage.warning('请填写批次名称')
+      return
+    }
+    creatingDataset.value = true
+    try {
+      const result = await requestJson<{ dataset: DatasetInfo }>('/api/datasets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, academic_year: datasetForm.academicYear.trim() }),
+      })
+      datasetDialog.value = false
+      datasetForm.name = ''
+      datasetForm.academicYear = ''
+      await fetchDatasets()
+      await switchDataset(result.dataset.id)
+      ElMessage.success('批次已创建')
+    } catch (error) {
+      ElMessage.error(`创建批次失败：${errorText(error)}`)
+    } finally {
+      creatingDataset.value = false
+    }
+  }
+
   async function fetchTables() {
     try {
       const data = await requestJson<{
@@ -208,13 +354,18 @@ export function useWorkspace() {
         total_cells: number
         school_name?: string
         school_metadata?: Record<string, string>
-      }>('/api/tables', { signal: AbortSignal.timeout(15000) })
+        dataset_id?: string
+        dataset_name?: string
+        current_revision?: number
+      }>(withDataset('/api/tables'), { signal: AbortSignal.timeout(15000) })
       const previousSchool = detectedSchool.value
       sheets.value = data.catalog || []
       totalCells.value = data.total_cells || 0
       detectedSchool.value = data.school_name || ''
       schoolMetadata.value = data.school_metadata || {}
-      if (!schoolName.value || schoolName.value === previousSchool)
+      if (data.dataset_id) activeDatasetId.value = data.dataset_id
+      if (schoolProfile.value.school_name) schoolName.value = schoolProfile.value.school_name
+      else if (!schoolName.value || schoolName.value === previousSchool)
         schoolName.value = data.school_name || ''
       tablesError.value = ''
       connection.value = 'online'
@@ -228,8 +379,9 @@ export function useWorkspace() {
 
   function applySnapshot(data: PipelineSnapshot) {
     reportDataChanged.value = Boolean(data.data_changed)
-    if (!schoolName.value && data.school_name && !data.data_changed)
-      schoolName.value = data.school_name
+    activeReportVersionId.value = data.report_version_id || ''
+    if (data.dataset_id && !activeDatasetId.value) activeDatasetId.value = data.dataset_id
+    if (data.school_name && !data.data_changed) schoolName.value = schoolProfile.value.school_name || data.school_name
     outlineAudit.value = data.outline_audit || null
     const previous = new Map(sections.value.map((section) => [section.id, section]))
     const plan = (data.sections_plan || []).map(
@@ -266,7 +418,7 @@ export function useWorkspace() {
     if (statusInFlight) return false
     statusInFlight = true
     try {
-      const data = await requestJson<PipelineSnapshot>('/api/pipeline/status', {
+      const data = await requestJson<PipelineSnapshot>(withDataset('/api/pipeline/status'), {
         signal: AbortSignal.timeout(15000),
       })
       if (!disposed) applySnapshot(data)
@@ -284,8 +436,10 @@ export function useWorkspace() {
     if (refreshing.value) return
     refreshing.value = true
     try {
-      const results = await Promise.all([fetchTables(), fetchStatus(), fetchConfig()])
-      if (results.every(Boolean))
+      const base = await Promise.all([fetchDatasets(), fetchSchoolProfile(), fetchConfig()])
+      if (!activeDatasetId.value) return
+      const results = await Promise.all([fetchTables(), fetchStatus()])
+      if ([...base, ...results].every(Boolean))
         lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     } finally {
       refreshing.value = false
@@ -338,21 +492,22 @@ export function useWorkspace() {
     sheetDrawer.value = false
     selectedSheet.value = null
     const results = await Promise.all([fetchTables(), fetchStatus()])
+    await fetchDatasets()
     return results.every(Boolean)
   }
 
   async function removeData(sheet?: SheetInfo) {
     if (dataBusy.value || isBusy.value) return
-    const title = sheet ? '删除工作表' : '清空全部入库数据'
+    const title = sheet ? '删除工作表' : '清空当前批次数据'
     const message = sheet
       ? `确定删除“${sheet.file_name} / ${sheet.sheet_name}”吗？该工作表及其入库单元格将被永久移除。同一文件中的其他工作表保留。已有报告保留，数据变化后需重新生成。`
-      : `确定清空当前账号的 ${sheets.value.length} 个工作表、${totalCells.value.toLocaleString()} 个单元格吗？此操作不可撤销。账号、模型配置和已有报告保留；入库数据及上传副本将被移除，本地导入目录中的原文件保留。`
+      : `确定清空当前批次“${activeDatasetName.value}”的 ${sheets.value.length} 个工作表、${totalCells.value.toLocaleString()} 个单元格吗？此操作不可撤销，其他批次和已有报告不受影响。`
     if (!(await confirm(message, title)) || dataBusy.value || isBusy.value) return
     if (sheet) deletingSheet.value = sheet.table_name
     else clearingData.value = true
     try {
       const result = await requestJson<{ message: string; file_cleanup_warning?: boolean }>(
-        sheet ? `/api/tables/${encodeURIComponent(sheet.table_name)}` : '/api/tables',
+        withDataset(sheet ? `/api/tables/${encodeURIComponent(sheet.table_name)}` : '/api/tables'),
         { method: 'DELETE' },
       )
       const refreshed = await refreshDataViews()
@@ -381,9 +536,8 @@ export function useWorkspace() {
   async function loadExample() {
     if (dataBusy.value || isBusy.value) return
     if (
-      totalCells.value &&
       !(await confirm(
-        '载入示例会清空当前已入库数据，并替换为项目内置报表。是否继续？',
+        '示例数据会写入独立的“示例数据”批次，不会影响当前正式批次。是否继续？',
         '载入示例数据',
       ))
     )
@@ -391,12 +545,15 @@ export function useWorkspace() {
     loadingExample.value = true
     addLog('开始载入内置示例报表')
     try {
-      const result = await requestJson<{ message: string }>('/api/load_example_data', {
-        method: 'POST',
-      })
-      if (!(await refreshDataViews())) throw new Error('示例已载入，但状态刷新失败，请刷新状态')
+      const result = await requestJson<{ message: string; dataset_id: string }>(
+        withDataset('/api/load_example_data'),
+        { method: 'POST' },
+      )
+      await fetchDatasets()
+      if (result.dataset_id) await switchDataset(result.dataset_id)
+      else if (!(await refreshDataViews())) throw new Error('示例已载入，但状态刷新失败，请刷新状态')
       addLog(result.message || '示例数据载入完成', 'success')
-      ElMessage.success('示例数据已载入')
+      ElMessage.success('示例数据已载入，已切换到示例批次')
     } catch (error) {
       addLog(errorText(error), 'error')
       ElMessage.error(`载入失败：${errorText(error)}`)
@@ -416,7 +573,7 @@ export function useWorkspace() {
     uploading.value = true
     addLog(`开始上传并解析 ${files.length} 个 Excel 文件`)
     try {
-      const result = await requestJson<{ message: string }>('/api/upload', {
+      const result = await requestJson<{ message: string }>(withDataset('/api/upload'), {
         method: 'POST',
         body: form,
       })
@@ -443,13 +600,14 @@ export function useWorkspace() {
     scanning.value = true
     addLog(`开始导入本地目录：${scanForm.directoryPath.trim()}`)
     try {
-      const result = await requestJson<{ message: string }>('/api/scan_directory', {
+      const result = await requestJson<{ message: string }>(withDataset('/api/scan_directory'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           directory_path: scanForm.directoryPath.trim(),
           recursive: scanForm.recursive,
           clear_existing: scanForm.clearExisting,
+          dataset_id: activeDatasetId.value,
         }),
       })
       if (!(await refreshDataViews())) throw new Error('目录已导入，但状态刷新失败，请刷新状态')
@@ -515,13 +673,23 @@ export function useWorkspace() {
   async function startPipeline() {
     if (isBusy.value || dataBusy.value || !totalCells.value) return
     if (!schoolName.value.trim()) {
-      ElMessage.warning('请先填写评估学校名称')
-      navigate('generation')
+      ElMessage.warning('请先在服务设置中填写学校名称')
+      navigate('settings')
+      return
+    }
+    if (
+      detectedSchool.value &&
+      schoolProfile.value.school_name &&
+      detectedSchool.value !== schoolProfile.value.school_name
+    ) {
+      ElMessage.error(
+        `当前批次数据识别为“${detectedSchool.value}”，与学校配置“${schoolProfile.value.school_name}”不一致，请切换到正确批次`,
+      )
       return
     }
     if (
       sections.value.some((section) => section.content) &&
-      !(await confirm('重新生成将替换本次报告内容及同名导出文件。是否继续？', '重新生成报告'))
+      !(await confirm('将创建一个新的报告版本，不会覆盖已有报告和导出文件。是否继续？', '开始生成报告'))
     )
       return
     try {
@@ -544,13 +712,16 @@ export function useWorkspace() {
     addLog(`开始为 ${schoolName.value.trim()} 生成报告`)
     navigate('generation')
     eventSource = new EventSource(
-      `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}`,
+      withDataset(`/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}`),
     )
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
         if (data.type === 'error') throw new Error(data.message || '报告生成失败')
-        if (data.type === 'stage_update') {
+        if (data.type === 'report_started') {
+          activeReportVersionId.value = data.report_version_id || ''
+          addLog('已创建新的报告版本', 'info')
+        } else if (data.type === 'stage_update') {
           currentStage.value = data.stage_id
           if (
             data.stage_id === 1 &&
@@ -627,7 +798,7 @@ export function useWorkspace() {
     if (!/^cell_[a-zA-Z0-9_]+$/.test(id)) throw new Error('无效的数据来源标识')
     const cached = cellCache.get(id)
     if (cached) return cached
-    const result = await requestJson<{ cell: CellInfo }>(`/api/cell/${encodeURIComponent(id)}`, {
+    const result = await requestJson<{ cell: CellInfo }>(withDataset(`/api/cell/${encodeURIComponent(id)}`), {
       signal: AbortSignal.timeout(15000),
     })
     cellCache.set(id, result.cell)
@@ -668,7 +839,10 @@ export function useWorkspace() {
     const path = exportFiles.value[`${kind}_url`]
     if (!path) return
     const url = new URL(path, window.location.origin)
-    if (url.origin !== window.location.origin || !url.pathname.startsWith('/api/exports/')) {
+    if (
+      url.origin !== window.location.origin ||
+      (!url.pathname.startsWith('/api/exports/') && !url.pathname.startsWith('/api/reports/'))
+    ) {
       ElMessage.error('服务器返回的下载地址无效')
       return
     }
@@ -699,6 +873,16 @@ export function useWorkspace() {
     schoolName,
     detectedSchool,
     schoolMetadata,
+    schoolProfile,
+    datasets,
+    activeDatasetId,
+    activeReportVersionId,
+    activeDataset,
+    activeDatasetName,
+    datasetsLoading,
+    creatingDataset,
+    datasetDialog,
+    datasetForm,
     sheets,
     totalCells,
     sections,
@@ -746,6 +930,12 @@ export function useWorkspace() {
     dataTopics,
     navigate,
     refreshAll,
+    fetchDatasets,
+    fetchSchoolProfile,
+    saveSchoolProfile,
+    schoolSaving,
+    switchDataset,
+    createDataset,
     loadExample,
     uploadFiles,
     scanDirectory,
