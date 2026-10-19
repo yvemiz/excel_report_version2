@@ -48,11 +48,19 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
               @click="w.startPipeline"
               >{{
                 w.isBusy
-                  ? '正在跟踪任务'
-                  : w.generatedSections.length
-                    ? '生成新版本'
-                    : '开始生成报告'
+                  ? '正在规划 / 生成'
+                  : w.taskState === 'outline_ready'
+                    ? '确认大纲并生成'
+                    : w.generatedSections.length
+                      ? '重新生成报告'
+                      : '生成大纲'
               }}</el-button
+            >
+            <el-button
+              v-if="w.taskState === 'outline_ready'"
+              :disabled="w.isBusy"
+              @click="w.planOutline"
+              >重新规划大纲</el-button
             >
             <div class="helper-text">
               依据 {{ w.sheets.length }} 个工作表生成 ·
@@ -69,6 +77,14 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
         show-icon
       />
     </el-card>
+    <el-alert
+      v-if="w.taskState === 'outline_ready'"
+      title="大纲已生成，等待确认"
+      description="请检查章节结构和大纲评语；确认后才会开始检索数据和撰写正文。"
+      type="info"
+      :closable="false"
+      show-icon
+    />
     <el-card shadow="never" class="generation-progress-card"
       ><template #header
         ><div class="card-heading">

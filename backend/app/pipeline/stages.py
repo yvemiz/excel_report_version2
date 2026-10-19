@@ -249,11 +249,28 @@ class ReportPipeline:
         """安全基准大纲兜底 (委托至 OutlinePlanner)"""
         return self.outline_planner.get_fallback_outline()
 
+    async def plan_outline_only(self, school_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """只运行 Stage 1，保存大纲并等待用户确认。"""
+        if school_name is not None:
+            self.custom_school_name = school_name.strip()
+        detected_meta = self.cell_lake.detect_school_metadata()
+        active_school = self.custom_school_name or detected_meta.get("school_name") or "普通高等学校"
+        self.custom_school_name = active_school
+        outline = await self.async_plan_outline(school_name=active_school)
+        self.sections_plan = outline
+        self.generated_sections = []
+        self.export_files = {}
+        self.current_stage = 1
+        self.data_changed = False
+        self.save_checkpoint()
+        return outline
+
     async def execute_pipeline(
         self, 
         school_name: Optional[str] = None, 
         resume: bool = False, 
-        max_concurrency: int = 3
+        max_concurrency: int = 3,
+        use_existing_outline: bool = False,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         全自动化执行五阶段流水线，流式推送每个阶段与小节的状态和生成产物
@@ -261,20 +278,23 @@ class ReportPipeline:
         """
         if school_name is not None:
             self.custom_school_name = school_name.strip()
-        resume = resume and not self.data_changed
-        self.generated_sections = []
-        self.export_files = {}
-        self.sections_plan = []
-
-        # ================= Stage 1: 规划阶段 =================
-        self.data_changed = False
-        self.current_stage = 1
-        yield {"type": "stage_update", "stage_id": 1, "status": "running"}
-
         detected_meta = self.cell_lake.detect_school_metadata()
         active_school = self.custom_school_name or detected_meta.get("school_name") or "普通高等学校"
         self.custom_school_name = active_school
-        outline = await self.async_plan_outline(school_name=active_school)
+        resume = resume and not self.data_changed
+        self.generated_sections = []
+        self.export_files = {}
+
+        # ================= Stage 1: 规划或复用已确认大纲 =================
+        if use_existing_outline and self.sections_plan and not self.data_changed:
+            outline = list(self.sections_plan)
+            self.current_stage = 1
+        else:
+            self.sections_plan = []
+            self.data_changed = False
+            self.current_stage = 1
+            yield {"type": "stage_update", "stage_id": 1, "status": "running"}
+            outline = await self.async_plan_outline(school_name=active_school)
 
         yield {
             "type": "stage_update",

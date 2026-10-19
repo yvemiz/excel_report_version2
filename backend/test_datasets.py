@@ -147,7 +147,7 @@ class DatasetApiTests(unittest.TestCase):
                         files={"files": (EXAMPLE_XLS.name, file, "application/vnd.ms-excel")},
                     )
 
-                async def fake_execute(self, school_name=None, resume=False):
+                async def fake_execute(self, school_name=None, resume=False, max_concurrency=3, use_existing_outline=False):
                     self.current_stage = 5
                     yield {"type": "stage_update", "stage_id": 5, "status": "completed", "data": {}}
 
@@ -162,6 +162,55 @@ class DatasetApiTests(unittest.TestCase):
                 reports = client.get(f"/api/datasets/{dataset}/reports").json()["reports"]
                 self.assertEqual(len(reports), 2)
                 self.assertTrue(all(item["status"] == "completed" for item in reports))
+
+    def test_outline_confirmation_flow(self):
+        with tempfile.TemporaryDirectory(prefix="outline_flow_") as root:
+            app = create_app(data_dir=root, allowed_origins=["http://testserver"])
+            with TestClient(app) as client:
+                client.post("/api/auth/register", json={
+                    "username": "tester", "password": "longpassword123", "display_name": "T",
+                })
+                client.put("/api/school", json={"school_name": "海南师范大学", "school_code": "11658"})
+                dataset = client.post("/api/datasets", json={"name": "2026 评估", "academic_year": "2026"}).json()["dataset"]["id"]
+                with EXAMPLE_XLS.open("rb") as file:
+                    client.post(
+                        f"/api/upload?dataset_id={dataset}",
+                        files={"files": (EXAMPLE_XLS.name, file, "application/vnd.ms-excel")},
+                    )
+
+                outline = [{
+                    "id": "s1", "chapter_title": "第一章 测试", "section_title": "1.1 测试小节",
+                    "objective": "测试", "file_name": EXAMPLE_XLS.name,
+                    "sheet_name": "1-1.学校概况", "table_name": "tbl_test",
+                }]
+
+                async def fake_plan(self, school_name=""):
+                    self.sections_plan = outline
+                    self.outline_jev_audit = {"is_approved": False, "structure_score": 0.82, "critique": "需复核"}
+                    return outline
+
+                async def fake_execute(self, school_name=None, resume=False, max_concurrency=3, use_existing_outline=False):
+                    self.current_stage = 5
+                    yield {"type": "stage_update", "stage_id": 5, "status": "completed", "data": {}}
+
+                with patch.object(ReportPipeline, "async_plan_outline", fake_plan):
+                    planned = client.post(f"/api/pipeline/outline?dataset_id={dataset}&school_name=海南师范大学")
+                self.assertEqual(planned.status_code, 200, planned.text)
+                report_id = planned.json()["report_version_id"]
+                self.assertEqual(len(planned.json()["outline"]), 1)
+                status = client.get(f"/api/datasets/{dataset}/status").json()
+                self.assertEqual(status["report_version_id"], report_id)
+                self.assertEqual(status["report_version_status"], "outline_ready")
+                self.assertEqual(len(status["sections_plan"]), 1)
+
+                with patch.object(ReportPipeline, "execute_pipeline", fake_execute):
+                    confirmed = client.get(
+                        f"/api/pipeline/stream?dataset_id={dataset}&report_version_id={report_id}&skip_outline=true&school_name=海南师范大学"
+                    )
+                self.assertEqual(confirmed.status_code, 200, confirmed.text)
+                reports = client.get(f"/api/datasets/{dataset}/reports").json()["reports"]
+                matched = next(item for item in reports if item["id"] == report_id)
+                self.assertEqual(matched["status"], "completed")
 
     def test_load_example_creates_separate_demo_dataset(self):
         with tempfile.TemporaryDirectory(prefix="dataset_demo_") as root:

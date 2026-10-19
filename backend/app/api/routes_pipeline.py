@@ -52,6 +52,49 @@ async def update_llm_config(cfg: ApiKeyConfig, workspace: Workspace = Depends(ge
     mode_name = "Pi-Agent 侧车智能体模式 (Node.js)" if cfg.agent_mode == "pi_agent" else "Python 原生极速模式"
     return {"success": True, "has_api_key": bool(config["api_key"]), "message": f"配置已保存，当前引擎：{mode_name}"}
 
+@router.post("/outline")
+async def plan_report_outline(
+    school_name: Optional[str] = None,
+    dataset_id: Optional[str] = Query(None),
+    workspace: Workspace = Depends(get_workspace),
+):
+    """只规划大纲并保存为待确认报告版本，不进入正文生成。"""
+    dataset = workspace.dataset(dataset_id)
+    if not dataset.cell_lake.count():
+        raise HTTPException(status_code=400, detail="请先为当前数据集上传 Excel 报表")
+    detected_school = dataset.cell_lake.detect_school_metadata().get("school_name", "").strip()
+    configured_school = workspace.school_name.strip()
+    if detected_school and configured_school and detected_school != configured_school:
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前批次数据识别为“{detected_school}”，与学校配置“{configured_school}”不一致，请切换到正确批次",
+        )
+
+    begin_operation(workspace)
+    report = None
+    try:
+        report = dataset.create_report(school_name=school_name or configured_school, status="outline_running")
+        outline = await report.pipeline.plan_outline_only(school_name=report.pipeline.custom_school_name)
+        report.mark_status("outline_ready")
+        return {
+            "dataset_id": dataset.dataset_id,
+            "report_version_id": report.report_version_id,
+            "outline": outline,
+            "outline_audit": report.pipeline.outline_jev_audit,
+            "quality_summary": report.pipeline.quality_summary(),
+        }
+    except HTTPException:
+        if report is not None:
+            report.mark_status("failed", "大纲规划失败")
+        raise
+    except Exception as exc:
+        if report is not None:
+            report.mark_status("failed", str(exc))
+        logging.getLogger(__name__).exception("Outline planning failed for user %s", workspace.user_id)
+        raise HTTPException(status_code=500, detail="大纲规划失败，请查看后端运行日志") from exc
+    finally:
+        workspace.operation_lock.release()
+
 @router.get("/status")
 async def get_pipeline_status(dataset_id: Optional[str] = Query(None), workspace: Workspace = Depends(get_workspace)):
     """获取当前数据集最新报告版本的执行状态与章节结果"""
@@ -61,6 +104,8 @@ async def get_pipeline_status(dataset_id: Optional[str] = Query(None), workspace
 async def pipeline_sse(
     school_name: Optional[str] = None,
     resume: bool = False,
+    skip_outline: bool = False,
+    report_version_id: Optional[str] = Query(None),
     dataset_id: Optional[str] = Query(None),
     workspace: Workspace = Depends(get_workspace),
 ):
@@ -79,19 +124,30 @@ async def pipeline_sse(
     begin_operation(workspace)
     try:
         report = None
-        if resume:
+        if report_version_id:
+            report = dataset.get_report(report_version_id)
+            if report.version.get("status") == "completed":
+                raise HTTPException(status_code=409, detail="该报告版本已完成；请重新规划大纲后再生成")
+        elif resume:
             latest = dataset.latest_report()
             if latest and latest.version.get("status") != "completed":
                 report = latest
         if report is None:
             report = dataset.create_report(school_name=school_name or workspace.school_name, status="running")
+        use_existing_outline = bool(skip_outline or report.pipeline.sections_plan)
+        if skip_outline and not report.pipeline.sections_plan:
+            raise HTTPException(status_code=400, detail="该报告版本没有可复用的大纲，请先规划大纲")
     except Exception:
         workspace.operation_lock.release()
         raise
     async def event_generator():
         try:
             yield f"data: {json.dumps({'type': 'report_started', 'dataset_id': dataset.dataset_id, 'report_version_id': report.report_version_id}, ensure_ascii=False)}\n\n"
-            async for event in report.pipeline.execute_pipeline(school_name=school_name, resume=resume):
+            async for event in report.pipeline.execute_pipeline(
+                school_name=school_name,
+                resume=resume,
+                use_existing_outline=use_existing_outline,
+            ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
                 await asyncio.sleep(0.01)
             report.mark_status("completed" if report.pipeline.current_stage >= 5 else "interrupted")

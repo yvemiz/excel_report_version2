@@ -95,7 +95,7 @@ class MergeCompatibilityTests(unittest.TestCase):
             response = self.client.get("/api/pipeline/stream?resume=true&school_name=Test", headers=cookie)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["x-accel-buffering"], "no")
-        self.assertEqual(calls, [{"school_name": "Test", "resume": True}])
+        self.assertEqual(calls, [{"school_name": "Test", "resume": True, "use_existing_outline": False}])
         self.assertFalse(workspace.operation_lock.locked())
 
     def test_resume_uses_account_checkpoint_and_rejects_changed_data(self):

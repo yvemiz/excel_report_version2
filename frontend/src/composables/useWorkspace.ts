@@ -87,7 +87,7 @@ export function useWorkspace() {
   const outlineAudit = ref<OutlineAudit | null>(null)
   const qualitySummary = ref<QualitySummary | null>(null)
   const reportDataChanged = ref(false)
-  const taskState = ref<'idle' | 'running' | 'observing' | 'completed' | 'interrupted'>('idle')
+  const taskState = ref<'idle' | 'running' | 'observing' | 'outline_ready' | 'completed' | 'interrupted'>('idle')
   const currentStage = ref(0)
   const currentSectionId = ref('')
   const currentActivity = ref('')
@@ -182,12 +182,14 @@ export function useWorkspace() {
         idle: '尚未开始',
         running: '正在生成',
         observing: '后台状态待确认',
+        outline_ready: '大纲待确认',
         completed: '生成完成',
         interrupted: '连接已中断',
       })[taskState.value],
   )
   const qualityNeedsAttention = computed(() => Boolean(qualitySummary.value?.needs_attention))
   const taskTagType = computed(() => {
+    if (taskState.value === 'outline_ready') return 'warning'
     if (taskState.value !== 'completed') return 'info'
     return qualityNeedsAttention.value ? 'warning' : 'success'
   })
@@ -208,6 +210,7 @@ export function useWorkspace() {
     return parts.join('；') || '存在需要人工确认的质量问题'
   })
   const taskSummaryText = computed(() => {
+    if (taskState.value === 'outline_ready') return '大纲已生成，请确认后再生成正文'
     if (taskState.value === 'completed') {
       return qualityNeedsAttention.value
         ? `报告已汇编，但${qualityDescription.value}，暂不建议正式交付`
@@ -432,9 +435,14 @@ export function useWorkspace() {
       section.status = result.passed ? 'audited' : 'warning'
     }
     sections.value = merged
+    // An outline-only report version is a deliberate pause point.
+    if (data.report_version_status === 'outline_ready') {
+      taskState.value = 'outline_ready'
+      currentStage.value = 1
+      currentActivity.value = '大纲已生成，等待确认'
     // The backend retains the previous run's exports until the next run finishes.
     // Only treat them as current when its stage is the final assembly stage.
-    if (data.current_stage === 5 && (data.export_files?.docx_url || data.export_files?.xlsx_url)) {
+    } else if (data.current_stage === 5 && (data.export_files?.docx_url || data.export_files?.xlsx_url)) {
       exportFiles.value = data.export_files
       if (taskState.value !== 'running') taskState.value = 'completed'
       currentStage.value = 5
@@ -703,7 +711,7 @@ export function useWorkspace() {
     ElMessage.success('本次报告生成已结束，可阅读或下载')
   }
 
-  async function startPipeline() {
+  async function planOutline() {
     if (isBusy.value || dataBusy.value || !totalCells.value) return
     if (!schoolName.value.trim()) {
       ElMessage.warning('请先在服务设置中填写学校名称')
@@ -721,8 +729,8 @@ export function useWorkspace() {
       return
     }
     if (
-      sections.value.some((section) => section.content) &&
-      !(await confirm('将创建一个新的报告版本，不会覆盖已有报告和导出文件。是否继续？', '开始生成报告'))
+      generatedSections.value.length &&
+      !(await confirm('将创建一个新的报告版本并重新规划大纲，不会覆盖已有报告。是否继续？', '重新规划大纲'))
     )
       return
     try {
@@ -743,10 +751,59 @@ export function useWorkspace() {
     sections.value = []
     pipelineError.value = ''
     executionLogs.value = []
-    addLog(`开始为 ${schoolName.value.trim()} 生成报告`)
+    addLog(`开始为 ${schoolName.value.trim()} 规划报告大纲`)
+    navigate('generation')
+    try {
+      const result = await requestJson<{
+        report_version_id: string
+        outline: Partial<ReportSection>[]
+        outline_audit?: OutlineAudit | null
+        quality_summary?: QualitySummary | null
+      }>(withDataset(`/api/pipeline/outline?school_name=${encodeURIComponent(schoolName.value.trim())}`), {
+        method: 'POST',
+      })
+      activeReportVersionId.value = result.report_version_id
+      sections.value = (result.outline || []).map(emptySection)
+      outlineAudit.value = result.outline_audit || null
+      qualitySummary.value = result.quality_summary || null
+      taskState.value = 'outline_ready'
+      currentStage.value = 1
+      currentActivity.value = '大纲已生成，等待确认'
+      addLog(`大纲规划完成，共 ${sections.value.length} 个小节，等待确认`, 'success')
+    } catch (error) {
+      taskState.value = 'idle'
+      currentActivity.value = ''
+      pipelineError.value = `大纲规划失败：${errorText(error)}`
+      addLog(pipelineError.value, 'error')
+      ElMessage.error(pipelineError.value)
+    }
+  }
+
+  async function confirmOutline() {
+    if (isBusy.value || dataBusy.value) return
+    if (taskState.value !== 'outline_ready' || !activeReportVersionId.value) {
+      await planOutline()
+      return
+    }
+    try {
+      await requestJson('/api/health', { signal: AbortSignal.timeout(15000) })
+    } catch (error) {
+      ElMessage.error(`后端服务不可用：${errorText(error)}`)
+      return
+    }
+    eventSource?.close()
+    taskState.value = 'running'
+    currentStage.value = 1
+    currentSectionId.value = ''
+    currentActivity.value = '大纲已确认，开始检索章节数据'
+    exportFiles.value = {}
+    pipelineError.value = ''
+    addLog('大纲已确认，开始生成正文')
     navigate('generation')
     eventSource = new EventSource(
-      withDataset(`/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}`),
+      withDataset(
+        `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}&report_version_id=${encodeURIComponent(activeReportVersionId.value)}&skip_outline=true`,
+      ),
     )
     eventSource.onmessage = (event) => {
       try {
@@ -816,6 +873,11 @@ export function useWorkspace() {
     }
     eventSource.onerror = () =>
       interruptStream('生成连接已断开。已接收的内容仍保留，请刷新状态并查看后端日志。')
+  }
+
+  async function startPipeline() {
+    if (taskState.value === 'outline_ready') return confirmOutline()
+    return planOutline()
   }
 
   function interruptStream(message: string) {
@@ -982,6 +1044,8 @@ export function useWorkspace() {
     deleteSheet,
     clearAllData,
     saveConfig,
+    planOutline,
+    confirmOutline,
     startPipeline,
     showSource,
     getCell,
