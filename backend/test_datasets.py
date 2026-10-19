@@ -42,6 +42,38 @@ class DatasetWorkspaceTests(unittest.TestCase):
             self.assertEqual(report_b.snapshot()["dataset_id"], b["id"])
             ws.close()
 
+    def test_quality_summary_flags_outline_and_failed_sections(self):
+        with tempfile.TemporaryDirectory(prefix="quality_ws_") as root:
+            auth = AuthStore(root)
+            user = auth.register("tester", "T", "longpassword123")
+            ws = Workspace(user["id"], root, auth)
+            dataset = ws.create_dataset("2026 评估", "2026")
+            report = ws.dataset(dataset["id"]).create_report("海南师范大学")
+            report.pipeline.outline_jev_audit = {
+                "is_approved": False, "structure_score": 0.82, "critique": "章节错位",
+            }
+            report.pipeline.generated_sections = [
+                {"id": "s1", "title": "1.1 通过", "passed": True,
+                 "audit": {"is_approved": True, "mismatch_count": 0}, "jev": {"approved": True}},
+                {"id": "s2", "title": "2.1 异常", "passed": False,
+                 "audit": {"is_approved": False, "mismatch_count": 2}, "jev": {"approved": False, "rejection_reason": "逻辑质量分偏低"}},
+            ]
+            quality = report.snapshot()["quality_summary"]
+            self.assertTrue(quality["needs_attention"])
+            self.assertFalse(quality["can_deliver"])
+            self.assertEqual(quality["sections_total"], 2)
+            self.assertEqual(quality["sections_failed"], 1)
+            self.assertEqual(quality["failed_sections"][0]["title"], "2.1 异常")
+            report.pipeline.outline_jev_audit = {"is_approved": True, "structure_score": 0.95}
+            report.pipeline.generated_sections = [
+                {"id": "s1", "title": "1.1 通过", "passed": True,
+                 "audit": {"is_approved": True, "mismatch_count": 0}, "jev": {"approved": True}},
+            ]
+            clean = report.snapshot()["quality_summary"]
+            self.assertFalse(clean["needs_attention"])
+            self.assertTrue(clean["can_deliver"])
+            ws.close()
+
     def test_legacy_checkpoint_becomes_readable_report_version(self):
         with tempfile.TemporaryDirectory(prefix="legacy_ws_") as root:
             auth = AuthStore(root)

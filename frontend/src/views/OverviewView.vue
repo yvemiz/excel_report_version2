@@ -73,18 +73,13 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
           <template #header
             ><div class="card-heading">
               <span>本次报告任务</span
-              ><el-tag :type="w.taskState === 'completed' ? 'success' : 'info'" effect="light">{{
-                w.taskLabel
-              }}</el-tag>
+              ><el-tag :type="w.taskTagType" effect="light">{{ w.taskTagLabel }}</el-tag>
             </div></template
           >
           <div v-if="w.currentStage || w.sections.length" class="task-overview">
             <div class="task-progress-label">
               <span>{{
-                w.currentActivity ||
-                (w.taskState === 'completed'
-                  ? '报告已汇编，可阅读与下载'
-                  : '正在读取后端保存的任务状态')
+                w.taskSummaryText
               }}</span
               ><strong>{{ w.progress }}%</strong>
             </div>
@@ -96,8 +91,17 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
               ></el-button>
             </div>
           </div>
+          <el-alert
+            v-if="w.taskState === 'completed' && w.qualityNeedsAttention"
+            title="报告存在需处理项"
+            :description="w.qualityDescription"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="connection-alert"
+          />
           <el-empty
-            v-else
+            v-if="!w.currentStage && !w.sections.length"
             :image-size="82"
             :description="
               w.totalCells

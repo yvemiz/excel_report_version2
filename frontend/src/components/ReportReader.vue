@@ -159,11 +159,14 @@ onBeforeUnmount(() => {
     <el-card shadow="never" class="reader-toolbar"
       ><div class="card-heading">
         <div>
-          <strong>{{ w.schoolName || '高校' }} · {{ w.activeDatasetName }}</strong>
+          <strong>{{ w.schoolName || '高校' }} · 本次报告</strong>
           <div class="card-subtitle">
             {{ w.generatedSections.length }} 个小节 ·
             {{ w.wordCount.toLocaleString() }} 字符<template v-if="w.isBusy"> · 正在更新</template>
-            <template v-if="w.activeReportVersionId"> · 报告版本 {{ w.activeReportVersionId.slice(-6) }}</template>
+            <template v-if="w.activeReportVersionId">
+              · 报告版本
+              {{ w.activeReportVersionId.startsWith('rv_legacy_') ? '历史版本' : w.activeReportVersionId.slice(-6) }}
+            </template>
           </div>
         </div>
         <el-space wrap
@@ -181,6 +184,15 @@ onBeforeUnmount(() => {
         >
       </div></el-card
     >
+    <el-alert
+      v-if="w.taskState === 'completed' && w.qualityNeedsAttention"
+      title="报告存在需处理项，暂不建议作为正式稿交付"
+      :description="w.qualityDescription"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="connection-alert"
+    />
     <el-card v-if="!content.length" shadow="never"
       ><el-empty :image-size="110" description="还没有报告正文，生成后可在这里按章节阅读"
         ><el-button type="primary" @click="w.navigate('generation')"
@@ -226,8 +238,8 @@ onBeforeUnmount(() => {
             <div class="eyebrow">本科教育教学质量评估</div>
             <h1>{{ w.schoolName || '高校' }}<br />教育教学质量发展检验报告</h1>
             <p>基于 {{ w.activeDatasetName }} 生成 · {{ w.generatedSections.length }} 个小节</p>
-            <el-tag type="info" effect="plain">{{
-              w.isBusy ? '生成中的报告' : '已生成报告'
+            <el-tag :type="w.qualityNeedsAttention ? 'warning' : 'info'" effect="plain">{{
+              w.isBusy ? '生成中的报告' : w.qualityNeedsAttention ? '已生成 · 需处理' : '已生成报告'
             }}</el-tag>
           </div>
           <article

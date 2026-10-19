@@ -21,16 +21,7 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
       ><template #header
         ><div class="card-heading">
           <span>本次报告</span
-          ><el-tag
-            :type="
-              w.taskState === 'completed'
-                ? 'success'
-                : w.taskState === 'interrupted'
-                  ? 'danger'
-                  : 'info'
-            "
-            >{{ w.taskLabel }}</el-tag
-          >
+          ><el-tag :type="w.taskTagType">{{ w.taskTagLabel }}</el-tag>
         </div></template
       >
       <el-row :gutter="32" align="middle">
@@ -101,8 +92,7 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
       <div class="progress-block">
         <div class="task-progress-label">
           <span>{{
-            w.currentActivity ||
-            (w.taskState === 'completed' ? '报告汇编已结束，可阅读或下载' : '等待开始生成')
+            w.taskSummaryText
           }}</span
           ><strong>{{ w.progress }}%</strong>
         </div>
@@ -112,7 +102,7 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
           :stroke-width="8"
           :status="
             w.taskState === 'completed'
-              ? 'success'
+              ? (w.qualityNeedsAttention ? 'warning' : 'success')
               : w.taskState === 'interrupted'
                 ? 'exception'
                 : undefined
@@ -122,6 +112,15 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
       <div class="helper-text">
         检索、撰写、核验按小节依次循环执行；进度按已完成核验的小节计算。
       </div>
+      <el-alert
+        v-if="w.taskState === 'completed' && w.qualityNeedsAttention"
+        title="报告存在需处理项"
+        :description="w.qualityDescription"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="connection-alert"
+      />
       <el-alert
         v-if="w.outlineAudit"
         :type="w.outlineAudit.is_approved ? 'success' : 'warning'"

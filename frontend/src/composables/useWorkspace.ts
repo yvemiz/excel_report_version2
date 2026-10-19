@@ -9,6 +9,7 @@ import type {
   OutlineAudit,
   PageId,
   PipelineSnapshot,
+  QualitySummary,
   ReportSection,
   SchoolProfile,
   SheetInfo,
@@ -84,6 +85,7 @@ export function useWorkspace() {
   const sections = ref<ReportSection[]>([])
   const exportFiles = ref<ExportFiles>({})
   const outlineAudit = ref<OutlineAudit | null>(null)
+  const qualitySummary = ref<QualitySummary | null>(null)
   const reportDataChanged = ref(false)
   const taskState = ref<'idle' | 'running' | 'observing' | 'completed' | 'interrupted'>('idle')
   const currentStage = ref(0)
@@ -184,6 +186,35 @@ export function useWorkspace() {
         interrupted: '连接已中断',
       })[taskState.value],
   )
+  const qualityNeedsAttention = computed(() => Boolean(qualitySummary.value?.needs_attention))
+  const taskTagType = computed(() => {
+    if (taskState.value !== 'completed') return 'info'
+    return qualityNeedsAttention.value ? 'warning' : 'success'
+  })
+  const taskTagLabel = computed(() =>
+    taskState.value === 'completed' && qualityNeedsAttention.value ? '完成 · 需处理' : taskLabel.value,
+  )
+  const qualityDescription = computed(() => {
+    const summary = qualitySummary.value
+    const parts: string[] = []
+    if (summary?.outline_approved === false) {
+      const score = summary.outline_score == null ? '' : ` ${Math.round(summary.outline_score * 100)} 分`
+      parts.push(`大纲检查${score}需要关注`)
+    }
+    const failed = summary?.failed_sections || []
+    if (failed.length) {
+      parts.push(`${failed.length} 个小节核验异常：${failed.map((item) => item.title).join('、')}`)
+    }
+    return parts.join('；') || '存在需要人工确认的质量问题'
+  })
+  const taskSummaryText = computed(() => {
+    if (taskState.value === 'completed') {
+      return qualityNeedsAttention.value
+        ? `报告已汇编，但${qualityDescription.value}，暂不建议正式交付`
+        : '报告已汇编，可阅读与下载'
+    }
+    return currentActivity.value || '正在读取后端保存的任务状态'
+  })
   const dataTopics = computed(() => {
     const sourceText = sheets.value
       .map((sheet) => `${sheet.file_name} ${sheet.sheet_name}`)
@@ -310,6 +341,7 @@ export function useWorkspace() {
     sections.value = []
     exportFiles.value = {}
     outlineAudit.value = null
+    qualitySummary.value = null
     reportDataChanged.value = false
     taskState.value = 'idle'
     currentStage.value = 0
@@ -380,6 +412,7 @@ export function useWorkspace() {
   function applySnapshot(data: PipelineSnapshot) {
     reportDataChanged.value = Boolean(data.data_changed)
     activeReportVersionId.value = data.report_version_id || ''
+    qualitySummary.value = data.quality_summary || null
     if (data.dataset_id && !activeDatasetId.value) activeDatasetId.value = data.dataset_id
     if (data.school_name && !data.data_changed) schoolName.value = schoolProfile.value.school_name || data.school_name
     outlineAudit.value = data.outline_audit || null
@@ -704,6 +737,7 @@ export function useWorkspace() {
     currentSectionId.value = ''
     currentActivity.value = '正在规划报告大纲'
     outlineAudit.value = null
+    qualitySummary.value = null
     reportDataChanged.value = false
     exportFiles.value = {}
     sections.value = []
@@ -888,9 +922,15 @@ export function useWorkspace() {
     sections,
     exportFiles,
     outlineAudit,
+    qualitySummary,
+    qualityNeedsAttention,
+    qualityDescription,
     reportDataChanged,
     taskState,
     taskLabel,
+    taskTagType,
+    taskTagLabel,
+    taskSummaryText,
     isBusy,
     dataBusy,
     currentStage,

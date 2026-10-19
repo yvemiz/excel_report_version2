@@ -124,6 +124,25 @@ export interface GeneratedSection {
   passed: boolean
 }
 
+
+export interface QualityFailure {
+  id: string
+  title: string
+  reason: string
+}
+
+export interface QualitySummary {
+  needs_attention: boolean
+  can_deliver: boolean
+  outline_approved?: boolean | null
+  outline_score?: number | null
+  outline_critique?: string
+  sections_total: number
+  sections_passed: number
+  sections_failed: number
+  failed_sections: QualityFailure[]
+}
+
 export interface ExportFiles {
   docx?: string
   xlsx?: string
@@ -150,6 +169,7 @@ export interface PipelineSnapshot {
   revision_no?: number
   report_created_at?: number | null
   report_completed_at?: number | null
+  quality_summary?: QualitySummary
 }
 
 export interface CellInfo {
