@@ -1332,3 +1332,22 @@ a:focus-visible,
     flex: 1 1 210px;
   }
 }
+
+
+.dataset-select-popper .el-select-dropdown__item {
+  height: auto;
+  min-height: 34px;
+  line-height: 1.4;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  white-space: normal;
+}
+.dataset-select-popper .el-select-dropdown__item .dataset-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dataset-select-popper .el-select-dropdown__item .dataset-option small {
+  display: block;
+  line-height: 1.35;
+}

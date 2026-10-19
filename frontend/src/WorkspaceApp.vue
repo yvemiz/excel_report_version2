@@ -182,7 +182,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
             show-icon
             class="connection-alert"
           />
-          <div class="dataset-strip">
+          <div v-if="w.datasets.length > 1" class="dataset-strip">
             <div class="dataset-strip-label">
               <el-icon><FolderOpened /></el-icon>
               <span>当前批次</span>
@@ -191,6 +191,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
               :model-value="w.activeDatasetId"
               :loading="w.datasetsLoading"
               class="dataset-strip-select"
+              popper-class="dataset-select-popper"
               placeholder="选择评估批次"
               @change="w.switchDataset"
             >

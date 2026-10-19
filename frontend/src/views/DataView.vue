@@ -9,6 +9,7 @@ import {
   Refresh,
   Document,
   Delete,
+  Plus,
 } from '@element-plus/icons-vue'
 import type { Workspace } from '../composables/useWorkspace'
 import type { SheetInfo } from '../types'
@@ -116,6 +117,9 @@ async function submitFiles() {
               @click="w.loadExample"
               >载入示例数据</el-button
             >
+            <el-divider />
+            <p>需要保留同一学校不同年度或评估批次时，可新建批次；不会切换学校。</p>
+            <el-button :icon="Plus" @click="w.datasetDialog = true">新建评估批次</el-button>
           </div></el-col
         >
       </el-row>
