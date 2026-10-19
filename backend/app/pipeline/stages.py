@@ -659,7 +659,8 @@ class ReportPipeline:
         excel_path = self.excel_exporter.export_audit_workbook(
             school_name=school_name,
             coverage_data=coverage_data,
-            reconciliation_data=reconciliation_data
+            reconciliation_data=reconciliation_data,
+            quality_summary=self.quality_summary(),
         )
 
         self.export_files = {

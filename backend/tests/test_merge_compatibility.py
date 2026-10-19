@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from docx import Document
+from openpyxl import load_workbook
 from fastapi.testclient import TestClient
 
 from app.application import create_app
@@ -173,6 +174,39 @@ class MergeCompatibilityTests(unittest.TestCase):
         self.assertNotIn("Cell Lake", text)
         self.assertFalse(any(line.strip().startswith("|") for line in paragraphs))
         self.assertTrue(any(len(table.columns) == 2 for table in doc.tables))
+
+    def test_audit_workbook_has_quality_sheet_and_numeric_scope_note(self):
+        workspace, _ = self.account("teacher_excel")
+        path = workspace.pipeline.excel_exporter.export_audit_workbook(
+            "海南师范大学",
+            coverage_data=[],
+            reconciliation_data=[{
+                "section_title": "2.1 测试章节",
+                "cited_text": "3100",
+                "metric_path": "单位号",
+                "file_name": "test.xls",
+                "sheet_name": "Sheet1",
+                "cell_ref": "B2",
+                "raw_value": "3100",
+                "status": "100% 吻合",
+            }],
+            quality_summary={
+                "needs_attention": True,
+                "can_deliver": False,
+                "outline_approved": False,
+                "outline_score": 0.82,
+                "sections_total": 1,
+                "sections_passed": 1,
+                "sections_failed": 0,
+                "failed_sections": [],
+            },
+        )
+        wb = load_workbook(path, data_only=True)
+        self.assertEqual(wb.sheetnames[0], "质量说明")
+        quality = wb["质量说明"]
+        self.assertEqual(quality["B8"].value, "暂不建议正式交付")
+        self.assertIn("不代表语义内容全部通过", quality["A10"].value)
+        self.assertIn("仅核对报告数值", wb["全文数字对账总表"]["A1"].value)
 
     def test_document_retains_word_toc_and_readable_citation_sources(self):
         workspace, _ = self.account("teacher_word")
