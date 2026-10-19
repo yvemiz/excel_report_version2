@@ -88,6 +88,43 @@ class ReportPipeline:
         except OSError:
             logging.getLogger(__name__).exception("Failed to save report checkpoint")
 
+    def quality_summary(self) -> Dict[str, Any]:
+        sections = list(self.generated_sections or [])
+        outline = self.outline_jev_audit or {}
+        failed: List[Dict[str, Any]] = []
+        passed_count = 0
+        for section in sections:
+            if section.get("passed"):
+                passed_count += 1
+                continue
+            audit = section.get("audit") or {}
+            judge = section.get("jev") or {}
+            reasons = []
+            if audit and not audit.get("is_approved", True):
+                mismatch = int(audit.get("mismatch_count") or 0)
+                reasons.append(f"{mismatch} 处引用不匹配" if mismatch else "引用核验未通过")
+            if judge and not judge.get("approved", True):
+                reasons.append(judge.get("rejection_reason") or "内容评审未通过")
+            failed.append({
+                "id": section.get("id", ""),
+                "title": section.get("title") or section.get("section_title") or section.get("id", ""),
+                "reason": "；".join(reasons) or "核验异常",
+            })
+        outline_approved = outline.get("is_approved")
+        outline_score = outline.get("structure_score")
+        needs_attention = outline_approved is False or bool(failed)
+        return {
+            "needs_attention": needs_attention,
+            "can_deliver": bool(sections) and not needs_attention,
+            "outline_approved": outline_approved,
+            "outline_score": outline_score,
+            "outline_critique": outline.get("critique", ""),
+            "sections_total": len(sections),
+            "sections_passed": passed_count,
+            "sections_failed": len(failed),
+            "failed_sections": failed,
+        }
+
     async def async_plan_outline(self, school_name: str = "") -> List[Dict[str, Any]]:
         """衔接侧车大纲规划、真实表绑定和 Jev 评估，失败时复用本地规则。"""
         if school_name:
@@ -613,7 +650,8 @@ class ReportPipeline:
             report_title=report_title,
             school_name=school_name,
             sections=self.generated_sections,
-            charts_dir=self.chart_service.output_dir
+            charts_dir=self.chart_service.output_dir,
+            quality_summary=self.quality_summary(),
         )
 
         # 导出 Excel 对账总表与覆盖率矩阵 (.xlsx)

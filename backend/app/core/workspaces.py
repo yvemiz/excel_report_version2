@@ -33,42 +33,7 @@ def _int_time() -> int:
 
 
 def _quality_summary(pipeline: ReportPipeline) -> Dict[str, Any]:
-    sections = list(pipeline.generated_sections or [])
-    outline = pipeline.outline_jev_audit or {}
-    failed: List[Dict[str, Any]] = []
-    passed_count = 0
-    for section in sections:
-        if section.get("passed"):
-            passed_count += 1
-            continue
-        audit = section.get("audit") or {}
-        judge = section.get("jev") or {}
-        reasons = []
-        if audit and not audit.get("is_approved", True):
-            mismatch = int(audit.get("mismatch_count") or 0)
-            reasons.append(f"{mismatch} 处引用不匹配" if mismatch else "引用核验未通过")
-        if judge and not judge.get("approved", True):
-            reasons.append(judge.get("rejection_reason") or "内容评审未通过")
-        failed.append({
-            "id": section.get("id", ""),
-            "title": section.get("title") or section.get("section_title") or section.get("id", ""),
-            "reason": "；".join(reasons) or "核验异常",
-        })
-    outline_approved = outline.get("is_approved")
-    outline_score = outline.get("structure_score")
-    outline_needs_attention = outline_approved is False
-    needs_attention = outline_needs_attention or bool(failed)
-    return {
-        "needs_attention": needs_attention,
-        "can_deliver": bool(sections) and not needs_attention,
-        "outline_approved": outline_approved,
-        "outline_score": outline_score,
-        "outline_critique": outline.get("critique", ""),
-        "sections_total": len(sections),
-        "sections_passed": passed_count,
-        "sections_failed": len(failed),
-        "failed_sections": failed,
-    }
+    return pipeline.quality_summary()
 
 
 class ReportWorkspace:

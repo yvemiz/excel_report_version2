@@ -3,6 +3,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -137,6 +138,41 @@ class MergeCompatibilityTests(unittest.TestCase):
             first.mark_data_changed()
             asyncio.run(run(resume=True))
             self.assertEqual(len(writes), 2)
+
+    def test_docx_cover_and_markdown_table_are_delivery_ready(self):
+        workspace, _ = self.account("teacher_docx")
+        destination = workspace.pipeline.docx_exporter.export_report(
+            "Report",
+            "海南师范大学",
+            [{
+                "title": "2.1 测试章节",
+                "level": 2,
+                "content": "正文说明。\n\n| 单元格 | 单位号 |\n|---|---|\n| B2 | 3100 |\n\n结尾说明。",
+                "audit": {"citations": []},
+            }],
+            str(workspace.chart_dir),
+            quality_summary={
+                "needs_attention": True,
+                "can_deliver": False,
+                "outline_approved": False,
+                "outline_score": 0.82,
+                "sections_failed": 1,
+                "sections_total": 1,
+            },
+            organization="海南师范大学",
+        )
+        doc = Document(destination)
+        paragraphs = [paragraph.text for paragraph in doc.paragraphs]
+        text = "\n".join(paragraphs + [
+            cell.text for table in doc.tables for row in table.rows for cell in row.cells
+        ])
+        today = datetime.now()
+        self.assertIn(f"{today.year} 年 {today.month} 月 {today.day} 日", text)
+        self.assertIn("暂不建议正式交付", text)
+        self.assertNotIn("Jev", text)
+        self.assertNotIn("Cell Lake", text)
+        self.assertFalse(any(line.strip().startswith("|") for line in paragraphs))
+        self.assertTrue(any(len(table.columns) == 2 for table in doc.tables))
 
     def test_document_retains_word_toc_and_readable_citation_sources(self):
         workspace, _ = self.account("teacher_word")

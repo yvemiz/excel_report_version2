@@ -1,6 +1,7 @@
 import os
 import re
-from typing import List, Dict, Any
+from datetime import datetime
+from typing import List, Dict, Any, Optional
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -40,7 +41,59 @@ class DocxExporter:
         text = re.sub(r'\[\s*\^\s*cell_[^\]\r\n]*\]', '', text, flags=re.IGNORECASE)
         return re.sub(r'\[\s*\^\s*cell_[^\]\r\n]*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
 
-    def export_report(self, report_title: str, school_name: str, sections: List[Dict[str, Any]], charts_dir: str) -> str:
+
+    @staticmethod
+    def _add_markdown_table(doc, table_lines: List[str]):
+        rows = []
+        for line in table_lines:
+            raw = line.strip()
+            inner = raw.strip('|').strip()
+            if re.fullmatch(r'[\s:|-]+', inner):
+                continue
+            rows.append([cell.strip() for cell in raw.strip('|').split('|')])
+        if not rows:
+            return
+        cols = max(len(row) for row in rows)
+        table = doc.add_table(rows=0, cols=cols)
+        try:
+            table.style = "Table Grid"
+        except Exception:
+            pass
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for row_index, row in enumerate(rows):
+            cells = table.add_row().cells
+            for col_index in range(cols):
+                text = row[col_index] if col_index < len(row) else ""
+                text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+                cells[col_index].text = text
+                for paragraph in cells[col_index].paragraphs:
+                    paragraph.alignment = (
+                        WD_ALIGN_PARAGRAPH.CENTER
+                        if row_index == 0 or col_index > 0
+                        else WD_ALIGN_PARAGRAPH.LEFT
+                    )
+                    for run in paragraph.runs:
+                        run.font.size = Pt(9)
+                        if row_index == 0:
+                            run.font.bold = True
+                            run.font.color.rgb = RGBColor(255, 255, 255)
+                if row_index == 0:
+                    shading = parse_xml(r'<w:shd {} w:fill="1E3D59"/>'.format(nsdecls('w')))
+                    cells[col_index]._tc.get_or_add_tcPr().append(shading)
+        doc.add_paragraph().paragraph_format.space_after = Pt(4)
+
+    def export_report(
+        self,
+        report_title: str,
+        school_name: str,
+        sections: List[Dict[str, Any]],
+        charts_dir: str,
+        quality_summary: Optional[Dict[str, Any]] = None,
+        generated_at: Optional[datetime] = None,
+        organization: str = "",
+    ) -> str:
+        quality_summary = quality_summary or {}
+        generated_at = generated_at or datetime.now()
         doc = Document()
 
         # 设置页面边距 (符合公文标准：上28mm，下28mm，左30mm，右30mm 约合 1.1~1.15 英寸)
@@ -86,12 +139,28 @@ class DocxExporter:
         p_meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p_meta.paragraph_format.line_spacing = 1.6
         
+        failed_count = int(quality_summary.get("sections_failed") or 0)
+        outline_needs_attention = quality_summary.get("outline_approved") is False
+        if quality_summary.get("needs_attention"):
+            quality_parts = []
+            if outline_needs_attention:
+                score = quality_summary.get("outline_score")
+                quality_parts.append(
+                    f"大纲需复核{'' if score is None else f'（{round(float(score) * 100)} 分）'}"
+                )
+            if failed_count:
+                quality_parts.append(f"{failed_count} 个小节核验异常")
+            quality_verdict = "；".join(quality_parts) + "，暂不建议正式交付"
+        elif quality_summary.get("can_deliver"):
+            quality_verdict = f"{int(quality_summary.get('sections_total') or 0)} 个小节核验通过，可交付"
+        else:
+            quality_verdict = "待核验"
         runs_info = [
             f"评 估 对 象：{school_name}",
-            "编 制 单 位：本科教学质量监测与发展评估中心",
-            "数 据 底 座：SQLite 单元格溯源湖 (Cell Lake)",
-            "质 检 裁 定：Jev 极速质量决策与 100% 物理对账通过",
-            "编 制 日 期：2026 年 9 月"
+            f"编 制 单 位：{organization or school_name}",
+            "数 据 底 座：原始 Excel 报表与单元格级溯源记录",
+            f"质 检 裁 定：{quality_verdict}",
+            f"编 制 日 期：{generated_at.year} 年 {generated_at.month} 月 {generated_at.day} 日",
         ]
         for idx, line in enumerate(runs_info):
             r = p_meta.add_run(line + ("\n" if idx < len(runs_info) - 1 else ""))
@@ -173,17 +242,40 @@ class DocxExporter:
                     f"{source.get('sheet_name', '')}!{source['cell_ref']}"
                     if source.get("cell_ref") else "见 Excel 对账表"
                 )
+                if source.get("is_verified") is True:
+                    citation_status = "已匹配"
+                elif source:
+                    citation_status = "需人工复核"
+                else:
+                    citation_status = "待核验"
                 all_citations_for_appendix.append({
                     "section_title": title,
                     "cited_text": self._strip_cell_citations(m.group(1)),
                     "source_location": source_location,
+                    "status": citation_status,
                 })
 
             # 正文段落与图表解析
             lines = self._strip_cell_citations(content).split("\n")
-            for line in lines:
+            index = 0
+            while index < len(lines):
+                line = lines[index]
+                index += 1
                 line_str = line.strip()
                 if not line_str:
+                    continue
+                if (
+                    not in_mermaid
+                    and line_str.startswith("|")
+                    and line_str.endswith("|")
+                    and index < len(lines)
+                    and re.fullmatch(r"\|?[\s:|-]+\|?", lines[index].strip())
+                ):
+                    table_lines = [line_str]
+                    while index < len(lines) and lines[index].strip().startswith("|"):
+                        table_lines.append(lines[index].strip())
+                        index += 1
+                    self._add_markdown_table(doc, table_lines)
                     continue
 
                 # 识别 Mermaid 块开始与结束，杜绝语法外泄到 Word 正文
@@ -194,7 +286,7 @@ class DocxExporter:
                     diag_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     diag_p.paragraph_format.space_before = Pt(6)
                     diag_p.paragraph_format.space_after = Pt(6)
-                    d_run = diag_p.add_run("【 学科与组织体系拓扑关系图：已在数字化交互平台渲染呈现 】")
+                    d_run = diag_p.add_run("图：本节结构关系示意图（详见电子版报告）")
                     d_run.font.size = Pt(9.5)
                     d_run.font.italic = True
                     d_run.font.color.rgb = RGBColor(100, 116, 139)
@@ -253,13 +345,13 @@ class DocxExporter:
             app_h = doc.add_paragraph()
             app_h.paragraph_format.space_before = Pt(16)
             app_h.paragraph_format.space_after = Pt(8)
-            app_run = app_h.add_run("附录：全文核心指标数据穿透溯源清单（Cell Lake 对账）")
+            app_run = app_h.add_run("附录：全文核心指标数据穿透溯源清单")
             app_run.font.size = Pt(14)
             app_run.font.bold = True
             app_run.font.color.rgb = RGBColor(30, 61, 89)
 
             intro_p = doc.add_paragraph()
-            intro_run = intro_p.add_run("本附录列示正文中所引全部关键统计数值在数据底座中的物理坐标存底，以备教育部及专家组进行 100% 穿透抽查核验。")
+            intro_run = intro_p.add_run("本附录列示正文中所引关键统计数值的来源位置，便于逐项核验；核验状态表示该数值与原始单元格是否匹配。")
             intro_run.font.size = Pt(9.5)
             intro_run.font.color.rgb = RGBColor(100, 116, 139)
             intro_p.paragraph_format.space_after = Pt(12)
@@ -290,7 +382,7 @@ class DocxExporter:
                 row_cells[1].text = cit["section_title"]
                 row_cells[2].text = cit["cited_text"]
                 row_cells[3].text = cit["source_location"]
-                row_cells[4].text = "100% 吻合"
+                row_cells[4].text = cit.get("status", "待核验")
 
                 # 隔行浅灰斑马纹
                 if row_idx % 2 == 0:
@@ -303,7 +395,14 @@ class DocxExporter:
                         p.alignment = WD_ALIGN_PARAGRAPH.CENTER if c_idx in [0, 2, 4] else WD_ALIGN_PARAGRAPH.LEFT
                         for r in p.runs:
                             r.font.size = Pt(9)
-                            r.font.color.rgb = RGBColor(21, 128, 61) if c_idx == 4 else RGBColor(30, 41, 59)
+                            if c_idx == 4:
+                                r.font.color.rgb = (
+                                    RGBColor(21, 128, 61)
+                                    if c.text == "已匹配"
+                                    else RGBColor(180, 83, 9)
+                                )
+                            else:
+                                r.font.color.rgb = RGBColor(30, 41, 59)
 
         # 保存文件
         clean_school = re.sub(r'[^a-zA-Z0-9_\u4e00-\u9fa5]', '', school_name) or "高校"
