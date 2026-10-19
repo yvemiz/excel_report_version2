@@ -1,13 +1,16 @@
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from app.application import create_app
 from app.core.auth_service import AuthStore
 from app.core.workspaces import Workspace
+from app.pipeline.stages import ReportPipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE_XLS = PROJECT_ROOT / "example" / "表1-1学校概况数据.xls"
@@ -96,6 +99,37 @@ class DatasetApiTests(unittest.TestCase):
                 status = client.get(f"/api/datasets/{a}/status").json()
                 self.assertEqual(status["dataset_id"], a)
                 self.assertEqual(status["report_version_status"], "empty")
+
+    def test_sse_creates_separate_report_versions_without_model_call(self):
+        with tempfile.TemporaryDirectory(prefix="dataset_versions_") as root:
+            app = create_app(data_dir=root, allowed_origins=["http://testserver"])
+            with TestClient(app) as client:
+                client.post("/api/auth/register", json={
+                    "username": "tester", "password": "longpassword123", "display_name": "T",
+                })
+                client.put("/api/school", json={"school_name": "海南师范大学", "school_code": "11658"})
+                dataset = client.post("/api/datasets", json={"name": "2026 评估", "academic_year": "2026"}).json()["dataset"]["id"]
+                with EXAMPLE_XLS.open("rb") as file:
+                    client.post(
+                        f"/api/upload?dataset_id={dataset}",
+                        files={"files": (EXAMPLE_XLS.name, file, "application/vnd.ms-excel")},
+                    )
+
+                async def fake_execute(self, school_name=None, resume=False):
+                    self.current_stage = 5
+                    yield {"type": "stage_update", "stage_id": 5, "status": "completed", "data": {}}
+
+                with patch.object(ReportPipeline, "execute_pipeline", fake_execute):
+                    first = client.get(f"/api/pipeline/stream?dataset_id={dataset}&school_name=海南师范大学")
+                    second = client.get(f"/api/pipeline/stream?dataset_id={dataset}&school_name=海南师范大学")
+                self.assertEqual(first.status_code, 200, first.text)
+                self.assertEqual(second.status_code, 200, second.text)
+                ids = re.findall(r'"report_version_id": "(rv_[0-9a-f]+)"', first.text + second.text)
+                self.assertEqual(len(ids), 2, first.text + second.text)
+                self.assertNotEqual(ids[0], ids[1])
+                reports = client.get(f"/api/datasets/{dataset}/reports").json()["reports"]
+                self.assertEqual(len(reports), 2)
+                self.assertTrue(all(item["status"] == "completed" for item in reports))
 
     def test_load_example_creates_separate_demo_dataset(self):
         with tempfile.TemporaryDirectory(prefix="dataset_demo_") as root:
