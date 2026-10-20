@@ -34,6 +34,7 @@ class ReportPipeline:
         jev_judge: JevJudge,
         checkpoint_dir: Optional[str] = None,
         export_url_prefix: str = "/api/exports",
+        report_kind: str = "real",
     ):
         self.cell_lake = cell_lake
         self.duckdb_engine = duckdb_engine
@@ -46,6 +47,8 @@ class ReportPipeline:
         self.outline_planner = OutlinePlanner(self.duckdb_engine)
         self.checkpoint_dir = checkpoint_dir or os.path.join(settings.DATA_DIR, "checkpoints")
         self.export_url_prefix = export_url_prefix.rstrip("/")
+        self.report_kind = report_kind or "real"
+        self.is_demo = self.report_kind == "demo"
         self.telemetry_file = os.path.join(os.path.dirname(self.checkpoint_dir), "telemetry_traces.jsonl")
 
         # 流水线全局状态
@@ -666,6 +669,8 @@ class ReportPipeline:
 
         school_name = active_school
         report_title = f"{school_name}本科教育教学质量发展检验报告"
+        if self.is_demo:
+            report_title = f"【示例报告】{report_title}"
 
         # 导出 Word (.docx)
         docx_path = self.docx_exporter.export_report(
@@ -674,6 +679,7 @@ class ReportPipeline:
             sections=self.generated_sections,
             charts_dir=self.chart_service.output_dir,
             quality_summary=self.quality_summary(),
+            is_demo=self.is_demo,
         )
 
         # 导出 Excel 对账总表与覆盖率矩阵 (.xlsx)
@@ -683,6 +689,7 @@ class ReportPipeline:
             coverage_data=coverage_data,
             reconciliation_data=reconciliation_data,
             quality_summary=self.quality_summary(),
+            is_demo=self.is_demo,
         )
 
         self.export_files = {

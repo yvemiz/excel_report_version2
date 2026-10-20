@@ -68,6 +68,20 @@ class DatasetWorkspaceTests(unittest.TestCase):
             self.assertEqual(retried.version["status"], "running")
             ws.close()
 
+    def test_demo_report_is_marked_as_demo(self):
+        with tempfile.TemporaryDirectory(prefix="demo_report_") as root:
+            auth = AuthStore(root)
+            user = auth.register("tester", "T", "longpassword123")
+            ws = Workspace(user["id"], root, auth)
+            demo = ws.ensure_demo_dataset()
+            report = ws.dataset(demo["id"]).create_report("海南师范大学", status="pending")
+            snapshot = report.snapshot()
+            self.assertEqual(snapshot["report_kind"], "demo")
+            self.assertTrue(snapshot["is_demo"])
+            self.assertFalse(snapshot["is_read_only"])
+            self.assertTrue(report.pipeline.is_demo)
+            ws.close()
+
     def test_quality_summary_flags_outline_and_failed_sections(self):
         with tempfile.TemporaryDirectory(prefix="quality_ws_") as root:
             auth = AuthStore(root)
@@ -237,6 +251,156 @@ class DatasetApiTests(unittest.TestCase):
                 reports = client.get(f"/api/datasets/{dataset}/reports").json()["reports"]
                 matched = next(item for item in reports if item["id"] == report_id)
                 self.assertEqual(matched["status"], "completed")
+
+    def test_upload_is_atomic_and_manifest_tracks_failed_import(self):
+        with tempfile.TemporaryDirectory(prefix="dataset_atomic_") as root:
+            app = create_app(data_dir=root, allowed_origins=["http://testserver"])
+            with TestClient(app) as client:
+                registered = client.post("/api/auth/register", json={
+                    "username": "tester", "password": "longpassword123", "display_name": "T",
+                })
+                self.assertEqual(registered.status_code, 201)
+                client.put("/api/school", json={"school_name": "海南师范大学", "school_code": "11658"})
+                dataset = client.post("/api/datasets", json={"name": "2026 评估", "academic_year": "2026"}).json()["dataset"]["id"]
+                with EXAMPLE_XLS.open("rb") as file:
+                    uploaded = client.post(
+                        f"/api/upload?dataset_id={dataset}",
+                        files={"files": (EXAMPLE_XLS.name, file, "application/vnd.ms-excel")},
+                    )
+                self.assertEqual(uploaded.status_code, 200, uploaded.text)
+                before_status = client.get(f"/api/datasets/{dataset}/status").json()
+                before_tables = client.get(f"/api/tables?dataset_id={dataset}").json()
+                manifest = client.get(f"/api/datasets/{dataset}/manifest").json()
+                self.assertEqual(manifest["file_count"], 1)
+                self.assertEqual(manifest["current_revision"], before_status["current_revision"])
+                self.assertTrue(manifest["files"][0]["source_file_id"].startswith("sf_"))
+                self.assertEqual(len(manifest["files"][0]["content_hash"]), 64)
+                self.assertEqual(manifest["recent_imports"][0]["status"], "completed")
+                self.assertTrue(before_tables["catalog"][0]["table_name"].startswith("tbl_sf_"))
+                self.assertTrue(before_tables["catalog"][0]["source_file_id"].startswith("sf_"))
+
+                failed = client.post(
+                    f"/api/upload?dataset_id={dataset}",
+                    files={"files": ("broken.xlsx", b"not an excel workbook", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                )
+                self.assertEqual(failed.status_code, 400, failed.text)
+                after_status = client.get(f"/api/datasets/{dataset}/status").json()
+                after_tables = client.get(f"/api/tables?dataset_id={dataset}").json()
+                after_manifest = client.get(f"/api/datasets/{dataset}/manifest").json()
+                self.assertEqual(after_status["current_revision"], before_status["current_revision"])
+                self.assertEqual(after_tables["total_cells"], before_tables["total_cells"])
+                self.assertEqual(after_manifest["recent_imports"][0]["status"], "failed")
+                self.assertIn("broken.xlsx", after_manifest["recent_imports"][0]["error"])
+
+    def test_second_import_accumulates_and_delete_uses_internal_identity(self):
+        with tempfile.TemporaryDirectory(prefix="dataset_multi_import_") as root:
+            app = create_app(data_dir=root, allowed_origins=["http://testserver"])
+            with TestClient(app) as client:
+                client.post("/api/auth/register", json={
+                    "username": "tester", "password": "longpassword123", "display_name": "T",
+                })
+                client.put("/api/school", json={"school_name": "海南师范大学", "school_code": "11658"})
+                dataset = client.post("/api/datasets", json={"name": "2026 评估", "academic_year": "2026"}).json()["dataset"]["id"]
+                for name in (EXAMPLE_XLS.name, "第二份学校概况数据.xls"):
+                    with EXAMPLE_XLS.open("rb") as file:
+                        response = client.post(
+                            f"/api/upload?dataset_id={dataset}",
+                            files={"files": (name, file, "application/vnd.ms-excel")},
+                        )
+                    self.assertEqual(response.status_code, 200, response.text)
+                catalog = client.get(f"/api/tables?dataset_id={dataset}").json()["catalog"]
+                self.assertEqual(len(catalog), 2)
+                self.assertTrue(all(item["table_name"].startswith("tbl_sf_") for item in catalog))
+                manifest = client.get(f"/api/datasets/{dataset}/manifest").json()
+                self.assertEqual(manifest["file_count"], 2)
+                self.assertEqual(len({item["source_file_id"] for item in manifest["files"]}), 2)
+                table_name = catalog[0]["table_name"]
+                removed = client.delete(f"/api/tables/{table_name}?dataset_id={dataset}")
+                self.assertEqual(removed.status_code, 200, removed.text)
+                remaining = client.get(f"/api/datasets/{dataset}/manifest").json()
+                self.assertEqual(remaining["file_count"], 1)
+                self.assertEqual(len(client.get(f"/api/tables?dataset_id={dataset}").json()["catalog"]), 1)
+
+    def test_scan_failure_does_not_clear_existing_data(self):
+        with tempfile.TemporaryDirectory(prefix="dataset_scan_atomic_") as root, tempfile.TemporaryDirectory(prefix="bad_scan_") as scan_root:
+            app = create_app(data_dir=root, allowed_origins=["http://testserver"])
+            with TestClient(app) as client:
+                client.post("/api/auth/register", json={
+                    "username": "tester", "password": "longpassword123", "display_name": "T",
+                })
+                client.put("/api/school", json={"school_name": "海南师范大学", "school_code": "11658"})
+                dataset = client.post("/api/datasets", json={"name": "2026 评估", "academic_year": "2026"}).json()["dataset"]["id"]
+                with EXAMPLE_XLS.open("rb") as file:
+                    self.assertEqual(client.post(
+                        f"/api/upload?dataset_id={dataset}",
+                        files={"files": (EXAMPLE_XLS.name, file, "application/vnd.ms-excel")},
+                    ).status_code, 200)
+                Path(scan_root, "broken.xlsx").write_bytes(b"broken workbook")
+                before = client.get(f"/api/datasets/{dataset}/status").json()
+                before_cells = client.get(f"/api/tables?dataset_id={dataset}").json()["total_cells"]
+                response = client.post("/api/scan_directory", json={
+                    "directory_path": scan_root,
+                    "clear_existing": True,
+                    "dataset_id": dataset,
+                })
+                self.assertEqual(response.status_code, 400, response.text)
+                after = client.get(f"/api/datasets/{dataset}/status").json()
+                self.assertEqual(after["current_revision"], before["current_revision"])
+                self.assertEqual(client.get(f"/api/tables?dataset_id={dataset}").json()["total_cells"], before_cells)
+                latest = client.get(f"/api/datasets/{dataset}/manifest").json()["recent_imports"][0]
+                self.assertEqual(latest["status"], "failed")
+
+    def test_legacy_report_and_batch_are_read_only(self):
+        with tempfile.TemporaryDirectory(prefix="legacy_readonly_") as root:
+            app = create_app(data_dir=root, allowed_origins=["http://testserver"])
+            with TestClient(app) as client:
+                registered = client.post("/api/auth/register", json={
+                    "username": "tester", "password": "longpassword123", "display_name": "T",
+                })
+                user_id = registered.json()["user"]["id"]
+                workspace = app.state.workspaces.get(user_id)
+                legacy = workspace.dataset(workspace.legacy_dataset_id)
+                report = legacy.ensure_legacy_report() or legacy.latest_report()
+                checkpoint = report.checkpoint_dir / "pipeline_checkpoint.json"
+                checkpoint.write_text(json.dumps({
+                    "current_stage": 5,
+                    "school_name": "海南师范大学",
+                    "sections_plan": [{"id": "s1", "section_title": "1.1 历史小节"}],
+                    "generated_sections": [{"id": "s1", "title": "1.1 历史小节", "content": "历史正文", "passed": True}],
+                    "export_files": {},
+                    "outline_audit": {},
+                    "data_changed": False,
+                }, ensure_ascii=False), encoding="utf-8")
+                report.mark_status("completed")
+                manifest = client.get(f"/api/datasets/{legacy.dataset_id}/manifest").json()
+                self.assertTrue(manifest["read_only"])
+                retry = client.post(f"/api/reports/{report.report_version_id}/sections/s1/retry")
+                self.assertEqual(retry.status_code, 409, retry.text)
+                clear = client.delete(f"/api/tables?dataset_id={legacy.dataset_id}")
+                self.assertEqual(clear.status_code, 409, clear.text)
+                outline = client.post(f"/api/pipeline/outline?dataset_id={legacy.dataset_id}")
+                self.assertEqual(outline.status_code, 409, outline.text)
+
+    def test_expected_revision_mismatch_blocks_generation(self):
+        with tempfile.TemporaryDirectory(prefix="expected_revision_") as root:
+            app = create_app(data_dir=root, allowed_origins=["http://testserver"])
+            with TestClient(app) as client:
+                client.post("/api/auth/register", json={
+                    "username": "tester", "password": "longpassword123", "display_name": "T",
+                })
+                client.put("/api/school", json={"school_name": "海南师范大学", "school_code": "11658"})
+                dataset = client.post("/api/datasets", json={"name": "2026 评估", "academic_year": "2026"}).json()["dataset"]["id"]
+                with EXAMPLE_XLS.open("rb") as file:
+                    self.assertEqual(client.post(
+                        f"/api/upload?dataset_id={dataset}",
+                        files={"files": (EXAMPLE_XLS.name, file, "application/vnd.ms-excel")},
+                    ).status_code, 200)
+                current = client.get(f"/api/datasets/{dataset}/manifest").json()["current_revision"]
+                response = client.post(
+                    f"/api/pipeline/outline?dataset_id={dataset}&expected_revision={current - 1}"
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertIn("数据修订号", response.json()["detail"])
 
     def test_load_example_creates_separate_demo_dataset(self):
         with tempfile.TemporaryDirectory(prefix="dataset_demo_") as root:

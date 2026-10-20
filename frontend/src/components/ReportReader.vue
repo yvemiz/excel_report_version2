@@ -185,6 +185,22 @@ onBeforeUnmount(() => {
       </div></el-card
     >
     <el-alert
+      v-if="w.isDemoReport"
+      title="示例报告"
+      description="本报告基于示例数据生成，仅用于功能体验，不得作为正式评估材料。导出的 Word 与 Excel 同样带有示例标识。"
+      type="warning"
+      :closable="false"
+      show-icon
+    />
+    <el-alert
+      v-if="w.isLegacyDataset"
+      title="历史报告只读"
+      description="该批次已有历史报告保护，不能修改数据、重新生成或重试小节；原有正文和导出文件仍可阅读下载。"
+      type="info"
+      :closable="false"
+      show-icon
+    />
+    <el-alert
       v-if="w.taskState === 'completed' && w.qualityNeedsAttention"
       title="报告存在需处理项，暂不建议作为正式稿交付"
       :description="w.qualityDescription"

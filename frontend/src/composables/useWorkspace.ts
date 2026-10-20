@@ -3,6 +3,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type {
   CellInfo,
   DatasetInfo,
+  DatasetManifest,
   ExecutionLog,
   ExportFiles,
   ModelConfig,
@@ -75,6 +76,10 @@ export function useWorkspace() {
   const datasets = ref<DatasetInfo[]>([])
   const activeDatasetId = ref('')
   const activeReportVersionId = ref('')
+  const manifest = ref<DatasetManifest | null>(null)
+  const manifestLoading = ref(false)
+  const reportKind = ref('')
+  const reportRevision = ref(0)
   const datasetsLoading = ref(false)
   const creatingDataset = ref(false)
   const schoolSaving = ref(false)
@@ -137,6 +142,13 @@ export function useWorkspace() {
   )
   const activeDatasetName = computed(() => activeDataset.value?.name || '未选择批次')
   const isBusy = computed(() => taskState.value === 'running' || taskState.value === 'observing')
+  const isLegacyDataset = computed(() =>
+    Boolean(manifest.value?.read_only || (activeDataset.value?.kind === 'legacy' && !manifest.value)),
+  )
+  const isDemoDataset = computed(
+    () => Boolean(manifest.value?.is_demo || activeDataset.value?.kind === 'demo'),
+  )
+  const isDemoReport = computed(() => reportKind.value === 'demo' || isDemoDataset.value)
   const dataBusy = computed(
     () =>
       uploading.value ||
@@ -341,6 +353,9 @@ export function useWorkspace() {
     sourceRequest++
     sheets.value = []
     totalCells.value = 0
+    manifest.value = null
+    reportKind.value = ''
+    reportRevision.value = 0
     sections.value = []
     exportFiles.value = {}
     outlineAudit.value = null
@@ -382,6 +397,28 @@ export function useWorkspace() {
     }
   }
 
+  async function fetchManifest() {
+    if (!activeDatasetId.value) {
+      manifest.value = null
+      return false
+    }
+    manifestLoading.value = true
+    try {
+      const data = await requestJson<DatasetManifest>(
+        `/api/datasets/${encodeURIComponent(activeDatasetId.value)}/manifest`,
+        { signal: AbortSignal.timeout(15000) },
+      )
+      manifest.value = data
+      return true
+    } catch (error) {
+      manifest.value = null
+      tablesError.value = `读取生成数据清单失败：${errorText(error)}`
+      return false
+    } finally {
+      manifestLoading.value = false
+    }
+  }
+
   async function fetchTables() {
     try {
       const data = await requestJson<{
@@ -414,6 +451,8 @@ export function useWorkspace() {
 
   function applySnapshot(data: PipelineSnapshot) {
     reportDataChanged.value = Boolean(data.data_changed)
+    reportKind.value = data.report_kind || data.dataset_kind || ''
+    reportRevision.value = Number(data.revision_no || 0)
     activeReportVersionId.value = data.report_version_id || ''
     qualitySummary.value = data.quality_summary || null
     if (data.dataset_id && !activeDatasetId.value) activeDatasetId.value = data.dataset_id
@@ -479,7 +518,7 @@ export function useWorkspace() {
     try {
       const base = await Promise.all([fetchDatasets(), fetchSchoolProfile(), fetchConfig()])
       if (!activeDatasetId.value) return
-      const results = await Promise.all([fetchTables(), fetchStatus()])
+      const results = await Promise.all([fetchTables(), fetchStatus(), fetchManifest()])
       if ([...base, ...results].every(Boolean))
         lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     } finally {
@@ -532,7 +571,7 @@ export function useWorkspace() {
     sourceCell.value = null
     sheetDrawer.value = false
     selectedSheet.value = null
-    const results = await Promise.all([fetchTables(), fetchStatus()])
+    const results = await Promise.all([fetchTables(), fetchStatus(), fetchManifest()])
     await fetchDatasets()
     return results.every(Boolean)
   }
@@ -718,6 +757,10 @@ export function useWorkspace() {
       navigate('settings')
       return
     }
+    if (isLegacyDataset.value) {
+      ElMessage.warning('历史批次为只读，请先在数据管理页新建评估批次')
+      return
+    }
     if (
       detectedSchool.value &&
       schoolProfile.value.school_name &&
@@ -728,6 +771,23 @@ export function useWorkspace() {
       )
       return
     }
+    if (!(await fetchManifest()) || !manifest.value) {
+      ElMessage.error('数据清单读取失败，不能开始生成')
+      return
+    }
+    const fileNames = manifest.value.files.slice(0, 8).map((file) => file.file_name)
+    const moreFiles = manifest.value.files.length > 8 ? ` 等 ${manifest.value.files.length} 个文件` : ''
+    const demoWarning = manifest.value.is_demo
+      ? '\n\n注意：当前是示例批次，生成的报告会明确标注为示例报告。'
+      : ''
+    const expectedRevision = manifest.value.current_revision
+    if (
+      !(await confirm(
+        `本次将读取：${fileNames.join('、')}${moreFiles}。\n共 ${manifest.value.file_count} 个文件、${manifest.value.sheet_count} 个工作表、${manifest.value.cell_count.toLocaleString()} 个单元格，数据修订号 v${expectedRevision}。${demoWarning}`,
+        '确认本次生成数据清单',
+      ))
+    )
+      return
     if (
       generatedSections.value.length &&
       !(await confirm('将创建一个新的报告版本并重新规划大纲，不会覆盖已有报告。是否继续？', '重新规划大纲'))
@@ -759,10 +819,14 @@ export function useWorkspace() {
         outline: Partial<ReportSection>[]
         outline_audit?: OutlineAudit | null
         quality_summary?: QualitySummary | null
-      }>(withDataset(`/api/pipeline/outline?school_name=${encodeURIComponent(schoolName.value.trim())}`), {
-        method: 'POST',
-      })
+      }>(
+        withDataset(
+          `/api/pipeline/outline?school_name=${encodeURIComponent(schoolName.value.trim())}&expected_revision=${expectedRevision}`,
+        ),
+        { method: 'POST' },
+      )
       activeReportVersionId.value = result.report_version_id
+      reportRevision.value = expectedRevision
       sections.value = (result.outline || []).map(emptySection)
       outlineAudit.value = result.outline_audit || null
       qualitySummary.value = result.quality_summary || null
@@ -785,6 +849,21 @@ export function useWorkspace() {
       await planOutline()
       return
     }
+    if (isLegacyDataset.value) {
+      ElMessage.warning('历史批次为只读，不能继续生成')
+      return
+    }
+    if (!(await fetchManifest()) || !manifest.value) {
+      ElMessage.error('数据清单读取失败，不能继续生成')
+      return
+    }
+    if (reportRevision.value && manifest.value.current_revision !== reportRevision.value) {
+      ElMessage.error(
+        `数据修订号已从 v${reportRevision.value} 变为 v${manifest.value.current_revision}，请重新规划大纲`,
+      )
+      return
+    }
+    const expectedRevision = manifest.value.current_revision
     try {
       await requestJson('/api/health', { signal: AbortSignal.timeout(15000) })
     } catch (error) {
@@ -802,7 +881,7 @@ export function useWorkspace() {
     navigate('generation')
     eventSource = new EventSource(
       withDataset(
-        `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}&report_version_id=${encodeURIComponent(activeReportVersionId.value)}&skip_outline=true`,
+        `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}&report_version_id=${encodeURIComponent(activeReportVersionId.value)}&skip_outline=true&expected_revision=${expectedRevision}`,
       ),
     )
     attachStreamHandlers()
@@ -883,6 +962,10 @@ export function useWorkspace() {
 
   async function retrySection(sectionId: string) {
     if (isBusy.value || dataBusy.value || !activeReportVersionId.value) return
+    if (isLegacyDataset.value) {
+      ElMessage.warning('历史报告为只读，不能重试小节')
+      return
+    }
     try {
       const result = await requestJson<{ report_version_id: string }>(
         `/api/reports/${encodeURIComponent(activeReportVersionId.value)}/sections/${encodeURIComponent(sectionId)}/retry`,
@@ -907,7 +990,7 @@ export function useWorkspace() {
       eventSource?.close()
       eventSource = new EventSource(
         withDataset(
-          `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}&report_version_id=${encodeURIComponent(activeReportVersionId.value)}&skip_outline=true&resume=true`,
+          `/api/pipeline/stream?school_name=${encodeURIComponent(schoolName.value.trim())}&report_version_id=${encodeURIComponent(activeReportVersionId.value)}&skip_outline=true&resume=true${manifest.value ? `&expected_revision=${manifest.value.current_revision}` : ''}`,
         ),
       )
       attachStreamHandlers()
@@ -918,6 +1001,10 @@ export function useWorkspace() {
   }
 
   async function startPipeline() {
+    if (isLegacyDataset.value) {
+      ElMessage.warning('历史批次为只读，请先新建评估批次')
+      return
+    }
     if (taskState.value === 'outline_ready') return confirmOutline()
     return planOutline()
   }
@@ -1017,6 +1104,13 @@ export function useWorkspace() {
     activeReportVersionId,
     activeDataset,
     activeDatasetName,
+    manifest,
+    manifestLoading,
+    reportKind,
+    reportRevision,
+    isLegacyDataset,
+    isDemoDataset,
+    isDemoReport,
     datasetsLoading,
     creatingDataset,
     datasetDialog,
@@ -1075,6 +1169,7 @@ export function useWorkspace() {
     navigate,
     refreshAll,
     fetchDatasets,
+    fetchManifest,
     fetchSchoolProfile,
     saveSchoolProfile,
     schoolSaving,

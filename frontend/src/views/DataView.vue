@@ -46,6 +46,14 @@ async function submitFiles() {
 <template>
   <div class="page-stack">
     <el-alert
+      v-if="w.isLegacyDataset"
+      title="历史报告批次只读"
+      description="为保护已有历史报告，不能修改或清空该批次数据。请新建评估批次后再继续导入。"
+      type="warning"
+      show-icon
+      :closable="false"
+    />
+    <el-alert
       v-if="w.isBusy"
       title="当前有报告任务，任务结束后可调整数据，避免生成依据发生变化。"
       type="info"
@@ -71,7 +79,7 @@ async function submitFiles() {
             :auto-upload="false"
             accept=".xls,.xlsx"
             :on-change="validateFile"
-            :disabled="w.isBusy || w.dataBusy"
+            :disabled="w.isBusy || w.dataBusy || w.isLegacyDataset"
             class="excel-uploader"
           >
             <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
@@ -87,7 +95,7 @@ async function submitFiles() {
               type="primary"
               :icon="UploadFilled"
               :loading="w.uploading"
-              :disabled="!files.length || w.isBusy || (w.dataBusy && !w.uploading)"
+              :disabled="!files.length || w.isBusy || w.isLegacyDataset || (w.dataBusy && !w.uploading)"
               @click="submitFiles"
               >上传并解析{{ files.length ? `（${files.length} 个文件）` : '' }}</el-button
             ><el-button
@@ -105,7 +113,7 @@ async function submitFiles() {
             <p>大量报表存放在本机时，可直接指定文件夹。</p>
             <el-button
               :icon="FolderOpened"
-              :disabled="w.isBusy || w.dataBusy"
+              :disabled="w.isBusy || w.dataBusy || w.isLegacyDataset"
               @click="w.folderDialog = true"
               >导入本地目录</el-button
             ><el-divider />
@@ -131,7 +139,7 @@ async function submitFiles() {
             <span>当前批次数据目录</span>
             <div class="card-subtitle">
               {{ w.activeDatasetName }} · {{ w.fileCount }} 个文件 · {{ w.sheets.length }} 个工作表 ·
-              {{ w.totalCells.toLocaleString() }} 个数据单元格
+              {{ w.totalCells.toLocaleString() }} 个数据单元格 · 修订号 v{{ w.manifest?.current_revision ?? '—' }}
             </div>
           </div>
           <el-space wrap>
@@ -144,7 +152,10 @@ async function submitFiles() {
               :icon="Delete"
               :loading="w.clearingData"
               :disabled="
-                w.isBusy || (w.dataBusy && !w.clearingData) || (!w.sheets.length && !w.totalCells)
+                w.isBusy ||
+                w.isLegacyDataset ||
+                (w.dataBusy && !w.clearingData) ||
+                (!w.sheets.length && !w.totalCells)
               "
               @click="w.clearAllData"
               >清空当前批次</el-button
@@ -203,7 +214,7 @@ async function submitFiles() {
               link
               type="danger"
               :loading="w.deletingSheet === row.table_name"
-              :disabled="w.isBusy || w.dataBusy"
+              :disabled="w.isBusy || w.dataBusy || w.isLegacyDataset"
               :aria-label="`删除工作表 ${row.sheet_name}`"
               @click="w.deleteSheet(row as SheetInfo)"
               >删除</el-button
@@ -220,6 +231,62 @@ async function submitFiles() {
           :total="filtered.length"
         />
       </div>
+    </el-card>
+    <el-card shadow="never">
+      <template #header
+        ><div class="card-heading">
+          <div>
+            <span>最近导入记录</span>
+            <div class="card-subtitle">
+              失败导入不会改变修订号或当前数据；可在此核对失败原因
+            </div>
+          </div>
+        </div></template
+      >
+      <el-table
+        :data="w.manifest?.recent_imports || []"
+        size="small"
+        empty-text="当前批次还没有导入记录"
+      >
+        <el-table-column label="时间" width="180">
+          <template #default="{ row }">
+            {{
+              row.created_at
+                ? new Date(row.created_at * 1000).toLocaleString('zh-CN', { hour12: false })
+                : '—'
+            }}
+          </template>
+        </el-table-column>
+        <el-table-column label="方式" prop="kind" width="100" />
+        <el-table-column label="文件" prop="file_count" width="80" align="right" />
+        <el-table-column label="工作表" prop="sheet_count" width="90" align="right" />
+        <el-table-column label="单元格" prop="cell_count" width="100" align="right" />
+        <el-table-column label="修订号" width="120">
+          <template #default="{ row }">
+            v{{ row.revision_before }} → v{{ row.revision_after ?? '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="90">
+          <template #default="{ row }">
+            <el-tag
+              :type="
+                row.status === 'completed'
+                  ? 'success'
+                  : row.status === 'failed'
+                    ? 'danger'
+                    : 'warning'
+              "
+              size="small"
+              >{{
+                row.status === 'completed' ? '已完成' : row.status === 'failed' ? '失败' : '进行中'
+              }}</el-tag
+            >
+          </template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="220">
+          <template #default="{ row }">{{ row.error || '—' }}</template>
+        </el-table-column>
+      </el-table>
     </el-card>
   </div>
 </template>

@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 from app.application import create_app
 from app.config import settings
 from app.core.auth_service import COOKIE_NAME
+from app.core.docx_exporter import DocxExporter
+from app.core.excel_exporter import ExcelExporter
 from app.core.telemetry_service import TelemetryService
 
 
@@ -146,6 +148,35 @@ class MergeCompatibilityTests(unittest.TestCase):
             first.mark_data_changed()
             asyncio.run(run(resume=True))
             self.assertEqual(len(writes), 2)
+
+    def test_demo_exports_are_clearly_labeled(self):
+        with tempfile.TemporaryDirectory() as output:
+            docx_path = DocxExporter(output).export_report(
+                report_title="示例报告：海南师范大学本科教育教学质量发展检验报告",
+                school_name="海南师范大学",
+                sections=[{"title": "1.1 示例小节", "level": 2, "content": "示例正文", "audit": {"citations": []}}],
+                charts_dir=output,
+                quality_summary={"sections_total": 1, "sections_passed": 1, "sections_failed": 0, "can_deliver": True},
+                is_demo=True,
+            )
+            text = "\n".join(paragraph.text for paragraph in Document(docx_path).paragraphs)
+            self.assertIn("示例报告", text)
+            self.assertIn("不得作为正式评估材料", text)
+
+            xlsx_path = ExcelExporter(output).export_audit_workbook(
+                school_name="海南师范大学",
+                coverage_data=[],
+                reconciliation_data=[],
+                quality_summary={"sections_total": 1, "sections_passed": 1, "sections_failed": 0, "can_deliver": True},
+                is_demo=True,
+            )
+            self.assertTrue(Path(xlsx_path).name.startswith("示例报告_"))
+            workbook = load_workbook(xlsx_path, data_only=True)
+            quality_rows = [
+                tuple(cell.value for cell in row)
+                for row in workbook["质量说明"].iter_rows(min_row=1, max_row=12, max_col=4)
+            ]
+            self.assertTrue(any("示例报告" in str(value) for row in quality_rows for value in row))
 
     def test_docx_cover_and_markdown_table_are_delivery_ready(self):
         workspace, _ = self.account("teacher_docx")

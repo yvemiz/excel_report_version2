@@ -5,6 +5,22 @@ import type { Workspace } from '../composables/useWorkspace'
 import type { ReportSection } from '../types'
 import { citationSummary, qualityState, sectionStatus } from '../utils/report'
 const { workspace: w } = defineProps<{ workspace: Workspace }>()
+
+function formatTime(value?: number | null) {
+  return value ? new Date(value * 1000).toLocaleString('zh-CN', { hour12: false }) : '—'
+}
+
+function importStatusType(status: string) {
+  if (status === 'completed') return 'success'
+  if (status === 'failed') return 'danger'
+  return 'warning'
+}
+
+function importStatusLabel(status: string) {
+  if (status === 'completed') return '已完成'
+  if (status === 'failed') return '失败'
+  return '进行中'
+}
 </script>
 
 <template>
@@ -17,11 +33,28 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
       show-icon
       :closable="false"
     />
+    <el-alert
+      v-if="w.isLegacyDataset"
+      title="历史报告批次只读"
+      description="已有历史报告内容受保护：不能修改入库数据、重新生成或重试小节。如需继续工作，请先在数据管理页新建评估批次。"
+      type="warning"
+      :closable="false"
+      show-icon
+    />
+    <el-alert
+      v-if="w.isDemoDataset"
+      title="当前为示例批次"
+      description="基于示例数据生成的 Word、Excel 和阅读页都会标注为“示例报告”，不得作为正式评估材料。"
+      type="info"
+      :closable="false"
+      show-icon
+    />
     <el-card shadow="never" class="generation-setup-card"
       ><template #header
         ><div class="card-heading">
           <span>本次报告</span
-          ><el-tag :type="w.taskTagType">{{ w.taskTagLabel }}</el-tag>
+          ><el-space><el-tag v-if="w.isDemoDataset" type="warning">示例数据</el-tag
+            ><el-tag :type="w.taskTagType">{{ w.taskTagLabel }}</el-tag></el-space>
         </div></template
       >
       <el-row :gutter="32" align="middle">
@@ -44,16 +77,18 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
               type="primary"
               :icon="DocumentAdd"
               :loading="w.isBusy"
-              :disabled="!w.totalCells || w.dataBusy || w.connection !== 'online'"
+              :disabled="!w.totalCells || w.dataBusy || w.connection !== 'online' || w.isLegacyDataset"
               @click="w.startPipeline"
               >{{
-                w.isBusy
-                  ? '正在规划 / 生成'
-                  : w.taskState === 'outline_ready'
-                    ? '确认大纲并生成'
-                    : w.generatedSections.length
-                      ? '重新生成报告'
-                      : '生成大纲'
+                w.isLegacyDataset
+                  ? '历史批次只读'
+                  : w.isBusy
+                    ? '正在规划 / 生成'
+                    : w.taskState === 'outline_ready'
+                      ? '确认大纲并生成'
+                      : w.generatedSections.length
+                        ? '重新生成报告'
+                        : '生成大纲'
               }}</el-button
             >
             <el-button
@@ -85,6 +120,81 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
       :closable="false"
       show-icon
     />
+    <el-card shadow="never" class="generation-setup-card"
+      ><template #header
+        ><div class="card-heading">
+          <div>
+            <span>本次数据清单</span>
+            <div class="card-subtitle">
+              生成前确认实际读取的文件与数据修订号
+            </div>
+          </div>
+          <el-tag type="info"
+            >数据修订 v{{ w.manifest?.current_revision ?? '—' }}</el-tag
+          >
+        </div></template
+      >
+      <div class="helper-text" style="margin-bottom: 12px">
+        {{ w.manifest?.file_count ?? 0 }} 个文件 ·
+        {{ w.manifest?.sheet_count ?? 0 }} 个工作表 ·
+        {{ (w.manifest?.cell_count ?? 0).toLocaleString() }} 个单元格
+      </div>
+      <el-table
+        :data="w.manifest?.files || []"
+        size="small"
+        empty-text="暂无可生成数据"
+        max-height="260"
+      >
+        <el-table-column label="来源文件" prop="file_name" min-width="220" />
+        <el-table-column label="存储方式" width="100">
+          <template #default="{ row }">
+            {{
+              row.storage_mode === 'upload'
+                ? '上传副本'
+                : row.storage_mode === 'scan'
+                  ? '本地目录'
+                  : row.storage_mode === 'example'
+                    ? '内置示例'
+                    : '历史数据'
+            }}
+          </template>
+        </el-table-column>
+        <el-table-column label="工作表" prop="sheet_count" width="90" align="right" />
+        <el-table-column label="单元格" width="110" align="right">
+          <template #default="{ row }">{{ row.cell_count.toLocaleString() }}</template>
+        </el-table-column>
+        <el-table-column label="导入时间" width="180">
+          <template #default="{ row }">{{ formatTime(row.imported_at) }}</template>
+        </el-table-column>
+      </el-table>
+      <el-collapse v-if="w.manifest?.recent_imports?.length" style="margin-top: 12px">
+        <el-collapse-item title="最近导入记录">
+          <el-table :data="w.manifest.recent_imports" size="small">
+            <el-table-column label="时间" width="180">
+              <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+            </el-table-column>
+            <el-table-column label="方式" prop="kind" width="90" />
+            <el-table-column label="文件" prop="file_count" width="70" align="right" />
+            <el-table-column label="小节数" prop="sheet_count" width="80" align="right" />
+            <el-table-column label="修订号" width="110">
+              <template #default="{ row }">
+                v{{ row.revision_before }} → v{{ row.revision_after ?? '—' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag :type="importStatusType(row.status)" size="small">
+                  {{ importStatusLabel(row.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="说明" min-width="180">
+              <template #default="{ row }">{{ row.error || '—' }}</template>
+            </el-table-column>
+          </el-table>
+        </el-collapse-item>
+      </el-collapse>
+    </el-card>
     <el-card shadow="never" class="generation-progress-card"
       ><template #header
         ><div class="card-heading">
@@ -189,7 +299,7 @@ const { workspace: w } = defineProps<{ workspace: Workspace }>()
             ><el-button link type="primary" :disabled="!row.content" @click="w.readSection(row.id)"
               >阅读</el-button
             ><el-popconfirm
-              v-if="row.audit && qualityState(row as ReportSection) === 'warning'"
+              v-if="!w.isLegacyDataset && row.audit && qualityState(row as ReportSection) === 'warning'"
               width="280"
               title="重试会新建报告版本并重新调用模型，只重写这一小节，是否继续？"
               confirm-button-text="重试"

@@ -56,6 +56,51 @@ export interface SheetInfo {
   columns?: string[]
   headers?: string[]
   cells_count?: number
+  source_file_id?: string
+  import_id?: string
+}
+
+export interface ManifestFile {
+  source_file_id: string
+  file_name: string
+  storage_mode: string
+  content_hash: string
+  size_bytes: number
+  sheet_count: number
+  cell_count: number
+  imported_at: number | null
+  import_id: string
+}
+
+export interface ImportRecord {
+  import_id: string
+  kind: string
+  status: 'running' | 'completed' | 'failed'
+  file_count: number
+  sheet_count: number
+  cell_count: number
+  revision_before: number
+  revision_after: number | null
+  error: string
+  created_at: number
+  completed_at: number | null
+}
+
+export interface DatasetManifest {
+  dataset_id: string
+  dataset_name: string
+  dataset_kind: 'legacy' | 'real' | 'demo'
+  academic_year: string
+  current_revision: number
+  school_name: string
+  read_only: boolean
+  is_demo: boolean
+  files: ManifestFile[]
+  file_count: number
+  sheet_count: number
+  cell_count: number
+  recent_imports: ImportRecord[]
+  warnings: string[]
 }
 
 export interface Citation {
@@ -169,6 +214,9 @@ export interface PipelineSnapshot {
   revision_no?: number
   report_created_at?: number | null
   report_completed_at?: number | null
+  report_kind?: string
+  is_demo?: boolean
+  is_read_only?: boolean
   quality_summary?: QualitySummary
 }
 

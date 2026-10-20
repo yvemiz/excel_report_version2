@@ -98,6 +98,14 @@ class AuthStore:
                 CREATE INDEX IF NOT EXISTS idx_report_versions_dataset
                     ON report_versions(dataset_id, created_at DESC);
             """)
+        with self.connect() as conn:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(report_versions)").fetchall()
+            }
+            if "dataset_kind" not in columns:
+                conn.execute(
+                    "ALTER TABLE report_versions ADD COLUMN dataset_kind TEXT NOT NULL DEFAULT ''"
+                )
 
     @contextmanager
     def connect(self):
@@ -349,16 +357,18 @@ class AuthStore:
         agent_mode: str = "",
         status: str = "running",
         report_version_id: str = "",
+        dataset_kind: str = "",
     ):
         report_id = report_version_id or f"rv_{uuid.uuid4().hex}"
         now = int(time.time())
         with self.connect() as conn:
             conn.execute(
                 "INSERT INTO report_versions(id,dataset_id,revision_no,status,school_name,"
-                "model,agent_mode,checkpoint_dir,export_dir,chart_dir,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "model,agent_mode,checkpoint_dir,export_dir,chart_dir,created_at,dataset_kind) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (report_id, dataset_id, revision_no, status, school_name.strip(),
-                 model, agent_mode, checkpoint_dir, export_dir, chart_dir, now),
+                 model, agent_mode, checkpoint_dir, export_dir, chart_dir, now,
+                 (dataset_kind or "").strip()),
             )
         return self.get_report_version(report_id)
 

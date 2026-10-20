@@ -58,6 +58,12 @@ def dataset_status(dataset_id: str, workspace: Workspace = Depends(get_workspace
     return workspace.snapshot(dataset_id)
 
 
+@router.get("/datasets/{dataset_id}/manifest")
+def dataset_manifest(dataset_id: str, workspace: Workspace = Depends(get_workspace)):
+    """生成前确认本次读取的文件、数据修订号和最近导入记录。"""
+    return workspace.dataset(dataset_id).manifest()
+
+
 @router.get("/datasets/{dataset_id}/reports")
 def dataset_reports(dataset_id: str, workspace: Workspace = Depends(get_workspace)):
     dataset = workspace.dataset(dataset_id)

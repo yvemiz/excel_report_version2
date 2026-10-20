@@ -91,6 +91,7 @@ class DocxExporter:
         quality_summary: Optional[Dict[str, Any]] = None,
         generated_at: Optional[datetime] = None,
         organization: str = "",
+        is_demo: bool = False,
     ) -> str:
         quality_summary = quality_summary or {}
         generated_at = generated_at or datetime.now()
@@ -125,6 +126,17 @@ class DocxExporter:
         r_title.font.bold = True
         r_title.font.color.rgb = RGBColor(30, 61, 89)  # 经典教务海军蓝
         p_title.paragraph_format.space_after = Pt(14)
+
+        if is_demo:
+            p_notice = doc.add_paragraph()
+            p_notice.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_notice = p_notice.add_run(
+                "【示例报告】基于示例数据生成，仅用于功能体验，不得作为正式评估材料"
+            )
+            r_notice.font.size = Pt(12)
+            r_notice.font.bold = True
+            r_notice.font.color.rgb = RGBColor(180, 83, 9)
+            p_notice.paragraph_format.space_after = Pt(10)
 
         # 封面副标
         p_sub = doc.add_paragraph()

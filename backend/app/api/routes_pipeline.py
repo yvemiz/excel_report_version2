@@ -10,6 +10,18 @@ from app.core.workspaces import Workspace, get_workspace, get_mutable_workspace,
 
 router = APIRouter(prefix="/api/pipeline", tags=["Pipeline Execution"])
 
+
+def _check_expected_revision(dataset, expected_revision: Optional[int]):
+    if expected_revision is None:
+        return
+    current = int(dataset.dataset.get("current_revision") or 1)
+    if int(expected_revision) != current:
+        raise HTTPException(
+            status_code=409,
+            detail=f"数据修订号已从 v{expected_revision} 变为 v{current}，请重新确认数据清单",
+        )
+
+
 class ApiKeyConfig(BaseModel):
     api_key: str = Field(default="", max_length=8192)
     clear_api_key: bool = False
@@ -56,10 +68,13 @@ async def update_llm_config(cfg: ApiKeyConfig, workspace: Workspace = Depends(ge
 async def plan_report_outline(
     school_name: Optional[str] = None,
     dataset_id: Optional[str] = Query(None),
+    expected_revision: Optional[int] = Query(None),
     workspace: Workspace = Depends(get_workspace),
 ):
     """只规划大纲并保存为待确认报告版本，不进入正文生成。"""
     dataset = workspace.dataset(dataset_id)
+    dataset.assert_report_writable()
+    _check_expected_revision(dataset, expected_revision)
     if not dataset.cell_lake.count():
         raise HTTPException(status_code=400, detail="请先为当前数据集上传 Excel 报表")
     detected_school = dataset.cell_lake.detect_school_metadata().get("school_name", "").strip()
@@ -107,10 +122,13 @@ async def pipeline_sse(
     skip_outline: bool = False,
     report_version_id: Optional[str] = Query(None),
     dataset_id: Optional[str] = Query(None),
+    expected_revision: Optional[int] = Query(None),
     workspace: Workspace = Depends(get_workspace),
 ):
     """SSE 流式事件接口；每次新生成创建独立的报告版本，不覆盖旧版本。"""
     dataset = workspace.dataset(dataset_id)
+    dataset.assert_report_writable()
+    _check_expected_revision(dataset, expected_revision)
     if not dataset.cell_lake.count():
         raise HTTPException(status_code=400, detail="请先为当前数据集上传 Excel 报表")
     detected_school = dataset.cell_lake.detect_school_metadata().get("school_name", "").strip()
@@ -176,6 +194,12 @@ async def pipeline_websocket(websocket: WebSocket, workspace: Workspace = Depend
             if action == "start":
                 req_school = data.get("school_name")
                 dataset = workspace.dataset(data.get("dataset_id"))
+                try:
+                    dataset.assert_report_writable()
+                    _check_expected_revision(dataset, data.get("expected_revision"))
+                except HTTPException as exc:
+                    await websocket.send_json({"type": "error", "message": exc.detail})
+                    continue
                 if not dataset.cell_lake.count() or not workspace.operation_lock.acquire(blocking=False):
                     await websocket.send_json({"type": "error", "message": "请先导入数据并等待当前任务结束"})
                     continue

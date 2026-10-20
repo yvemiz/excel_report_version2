@@ -1,6 +1,9 @@
 """Account-scoped services for a single-school instance with isolated datasets."""
 import copy
+import hashlib
 import json
+import os
+import shutil
 import logging
 import threading
 import time
@@ -66,6 +69,7 @@ class ReportWorkspace:
             self.judge,
             checkpoint_dir=str(self.checkpoint_dir),
             export_url_prefix=prefix,
+            report_kind=self.version.get("dataset_kind") or dataset_workspace.kind,
         )
         self.apply_config(self.owner.config)
         self.restore()
@@ -129,6 +133,9 @@ class ReportWorkspace:
             "revision_no": self.version.get("revision_no", 1),
             "report_created_at": self.version.get("created_at"),
             "report_completed_at": self.version.get("completed_at"),
+            "report_kind": self.version.get("dataset_kind") or dataset.get("kind", "real"),
+            "is_demo": (self.version.get("dataset_kind") or dataset.get("kind")) == "demo",
+            "is_read_only": self.dataset_workspace.read_only,
             "quality_summary": _quality_summary(pipe),
         }
 
@@ -145,6 +152,7 @@ class ReportWorkspace:
 
     def retry_section(self, section_id: str) -> "ReportWorkspace":
         """Create a new report version that regenerates one section and reuses the rest."""
+        self.dataset_workspace.assert_report_writable()
         plan_ids = {item.get("id") for item in (self.pipeline.sections_plan or [])}
         if section_id not in plan_ids:
             raise HTTPException(status_code=404, detail="章节不存在于当前报告大纲")
@@ -195,20 +203,344 @@ class DatasetWorkspace:
                 raise HTTPException(status_code=500, detail="数据集存储路径无效")
             self.upload_dir = self.root / "uploads"
             self.reports_dir = self.root / "reports"
-        for directory in (self.root, self.upload_dir, self.reports_dir):
+        self.imports_dir = self.root / ".imports"
+        for directory in (self.root, self.upload_dir, self.reports_dir, self.imports_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
         self.cell_lake = CellLake(str(self.root / "cell_lake.db"))
         self.duckdb = DuckDBEngine(str(self.root / "metrics.duckdb"))
         self._sync_table_metadata()
+        self._recover_interrupted_imports()
         self._reports: Dict[str, ReportWorkspace] = {}
+
+    def _recover_interrupted_imports(self):
+        """服务重启后标记中断导入，并清理未被当前数据引用的暂存文件。"""
+        for record in self.cell_lake.list_imports(limit=100):
+            if record.get("status") == "running":
+                self.cell_lake.finish_import(
+                    record["import_id"],
+                    status="failed",
+                    file_count=int(record.get("file_count") or 0),
+                    error="导入过程中断，原数据未改变",
+                    completed=True,
+                )
+        for child in list(self.imports_dir.iterdir()):
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+        active_ids = {
+            item["source_file_id"] for item in self.cell_lake.list_source_files()
+        }
+        for child in list(self.upload_dir.iterdir()):
+            if child.is_dir() and child.name.startswith("sf_") and child.name not in active_ids:
+                shutil.rmtree(child, ignore_errors=True)
 
     def _sync_table_metadata(self):
         for source in self.cell_lake.get_tables_summary():
-            name = f"{Path(source['file_name']).stem}_{source['sheet_name']}"
-            table = self.duckdb.registered_tables.get(self.duckdb._sanitize_table_name(name))
+            source_file_id = source.get("source_file_id") or ""
+            if source_file_id:
+                table_name = DuckDBEngine.table_name_for(source_file_id, source["sheet_name"])
+            else:
+                name = f"{Path(source['file_name']).stem}_{source['sheet_name']}"
+                table_name = self.duckdb._sanitize_table_name(name)
+            table = self.duckdb.registered_tables.get(table_name)
             if table:
-                table.update(file_name=source["file_name"], sheet_name=source["sheet_name"])
+                table.update(
+                    file_name=source["file_name"],
+                    sheet_name=source["sheet_name"],
+                    source_file_id=source_file_id,
+                )
+
+    @property
+    def read_only(self) -> bool:
+        """已有实质历史报告内容时才锁定旧批次。"""
+        if not self.is_legacy:
+            return False
+        checkpoint = self.root / "checkpoints" / "pipeline_checkpoint.json"
+        if not checkpoint.exists():
+            return False
+        try:
+            saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True
+        return bool(
+            saved.get("sections_plan")
+            or saved.get("generated_sections")
+            or saved.get("export_files")
+            or int(saved.get("current_stage") or 0) > 0
+        )
+
+    def assert_writable(self, action: str):
+        if self.read_only:
+            raise HTTPException(
+                status_code=409,
+                detail=f"历史批次为只读，不能{action}；请新建评估批次后继续",
+            )
+
+    def assert_report_writable(self):
+        self.assert_writable("重新生成或重试历史报告")
+
+    def has_source_file(self, original_name: str) -> bool:
+        if self.cell_lake.find_source_file_by_name(original_name):
+            return True
+        # 兼容尚未迁移到 source_files 的旧数据。
+        return any(
+            item["file_name"] == original_name for item in self.cell_lake.get_tables_summary()
+        )
+
+    def begin_import(self, kind: str, file_count: int = 0) -> str:
+        self.assert_writable("导入数据")
+        return self.cell_lake.begin_import(
+            kind,
+            file_count=file_count,
+            revision_before=int(self.dataset.get("current_revision") or 1),
+        )
+
+    def fail_import(self, import_id: str, error: str):
+        self.cell_lake.finish_import(
+            import_id,
+            status="failed",
+            error=error,
+            completed=True,
+        )
+
+    def commit_import(
+        self,
+        import_id: str,
+        parsed_sheets: List[Dict[str, Any]],
+        files: List[Dict[str, Any]],
+        replace_existing: bool = False,
+    ) -> Dict[str, Any]:
+        """用暂存数据库完成原子导入；失败时不改变当前数据和修订号。"""
+        self.assert_writable("导入数据")
+        if not parsed_sheets:
+            raise HTTPException(status_code=400, detail="没有可提交的解析结果")
+
+        names = [item["original_name"] for item in files]
+        if len(names) != len(set(names)):
+            raise HTTPException(status_code=409, detail="本次导入包含同名文件，请先重命名")
+        if not replace_existing:
+            conflicts = [name for name in names if self.has_source_file(name)]
+            if conflicts:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"当前批次已存在同名文件“{conflicts[0]}”，请先删除旧文件或改用新批次",
+                )
+
+        file_by_path = {
+            os.path.abspath(item.get("parse_path") or item.get("original_path") or ""): item
+            for item in files
+        }
+        stage_dir = self.imports_dir / import_id
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        stage_cell_path = str(stage_dir / "cell_lake.db")
+        stage_duck_path = str(stage_dir / "metrics.duckdb")
+        stage_lake: Optional[CellLake] = None
+        stage_duck: Optional[DuckDBEngine] = None
+        moved_files: List[Path] = []
+        try:
+            self.cell_lake.snapshot_to(stage_cell_path)
+            stage_lake = CellLake(stage_cell_path)
+            if replace_existing:
+                # 替换数据时保留导入历史，只清空当前有效文件、单元格和指标表。
+                stage_lake.clear()
+                stage_duck = DuckDBEngine(stage_duck_path)
+            else:
+                self.duckdb.snapshot_to(stage_duck_path)
+                stage_duck = DuckDBEngine(stage_duck_path)
+
+            for item in files:
+                stage_lake.add_source_file({
+                    "source_file_id": item["source_file_id"],
+                    "original_name": item["original_name"],
+                    "storage_mode": item["storage_mode"],
+                    "stored_rel_path": item.get("stored_rel_path", ""),
+                    "original_path": item.get("original_path", ""),
+                    "content_hash": item.get("content_hash", ""),
+                    "size_bytes": item.get("size_bytes", 0),
+                    "import_id": import_id,
+                })
+
+            # 上传副本先进入唯一内部目录，数据库交换失败时再逐个清理。
+            for item in files:
+                temp_path = item.get("temp_path")
+                if item.get("storage_mode") != "upload" or not temp_path:
+                    continue
+                final_path = self.upload_dir / item["source_file_id"] / item["original_name"]
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(temp_path), str(final_path))
+                moved_files.append(final_path)
+
+            total_cells = 0
+            for parsed in parsed_sheets:
+                parse_path = os.path.abspath(parsed.get("file_path", ""))
+                source = file_by_path.get(parse_path)
+                if source is None:
+                    raise ValueError(f"无法匹配解析来源文件：{parsed.get('file_name', '')}")
+                source_file_id = source["source_file_id"]
+                sheet_name = parsed["sheet_name"]
+                for cell in parsed.get("cells", []):
+                    cell_ref = cell["cell_ref"]
+                    digest = hashlib.sha256(
+                        f"{source_file_id}|{sheet_name}|{cell_ref}".encode("utf-8")
+                    ).hexdigest()[:16]
+                    cell["cell_id"] = f"cell_{digest}"
+                    cell["file_name"] = source["original_name"]
+                    cell["source_file_id"] = source_file_id
+                    cell["import_id"] = import_id
+                total_cells += stage_lake.insert_cells(parsed.get("cells", []), batch_size=2000)
+                stage_duck.register_sheet(
+                    sheet_name,
+                    source["original_name"],
+                    parsed["rows"],
+                    parsed["header_paths"],
+                    source_file_id=source_file_id,
+                    import_id=import_id,
+                )
+
+            expected_revision = int(self.dataset.get("current_revision") or 1) + 1
+            stage_lake.finish_import(
+                import_id,
+                status="completed",
+                file_count=len(files),
+                sheet_count=len(parsed_sheets),
+                cell_count=total_cells,
+                revision_after=expected_revision,
+            )
+            stage_lake.checkpoint()
+            stage_duck.checkpoint()
+            stage_duck.close()
+            stage_duck = None
+            self._swap_import_databases(stage_cell_path, stage_duck_path, stage_dir)
+            revision = self.mark_data_changed()
+            self.cell_lake.finish_import(
+                import_id,
+                status="completed",
+                file_count=len(files),
+                sheet_count=len(parsed_sheets),
+                cell_count=total_cells,
+                revision_after=revision,
+            )
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            return {
+                "import_id": import_id,
+                "file_count": len(files),
+                "sheet_count": len(parsed_sheets),
+                "cell_count": total_cells,
+                "current_revision": revision,
+            }
+        except Exception as exc:
+            if stage_duck is not None:
+                try:
+                    stage_duck.close()
+                except Exception:
+                    pass
+            for path in moved_files:
+                try:
+                    if path.exists():
+                        path.unlink()
+                    if path.parent.exists() and not any(path.parent.iterdir()):
+                        path.parent.rmdir()
+                except OSError:
+                    logger.exception("Cannot clean staged upload %s", path)
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            self.fail_import(import_id, str(exc))
+            raise
+
+    def _swap_import_databases(self, stage_cell_path: str, stage_duck_path: str, stage_dir: Path):
+        live_cell = Path(self.cell_lake.db_path)
+        live_duck = Path(self.duckdb.db_path)
+        backup_dir = stage_dir / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_cell = backup_dir / live_cell.name
+        backup_duck = backup_dir / live_duck.name
+        self.cell_lake.checkpoint()
+        try:
+            self.duckdb.close()
+        except Exception:
+            logger.exception("Cannot close DuckDB before import swap")
+
+        moved_live = False
+        try:
+            if live_cell.exists():
+                os.replace(live_cell, backup_cell)
+                moved_live = True
+            if live_duck.exists():
+                os.replace(live_duck, backup_duck)
+                moved_live = True
+            os.replace(stage_cell_path, live_cell)
+            os.replace(stage_duck_path, live_duck)
+        except Exception:
+            logger.exception("Import database swap failed; restoring previous stores")
+            for live, backup in ((live_cell, backup_cell), (live_duck, backup_duck)):
+                try:
+                    if live.exists():
+                        live.unlink()
+                    if backup.exists():
+                        os.replace(backup, live)
+                except OSError:
+                    logger.exception("Cannot restore import backup %s", backup)
+            raise
+        finally:
+            self.cell_lake = CellLake(str(live_cell))
+            self.duckdb = DuckDBEngine(str(live_duck))
+            self._reports.clear()
+            self._sync_table_metadata()
+
+    def manifest(self) -> Dict[str, Any]:
+        tables = self.cell_lake.get_tables_summary()
+        sources = self.cell_lake.list_source_files()
+        by_id = {item["source_file_id"]: item for item in sources}
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for table in tables:
+            source_id = table.get("source_file_id") or ""
+            key = source_id or f"legacy:{table['file_name']}"
+            item = grouped.setdefault(key, {
+                "source_file_id": source_id,
+                "file_name": table["file_name"],
+                "storage_mode": "legacy" if not source_id else "",
+                "content_hash": "",
+                "size_bytes": 0,
+                "sheet_count": 0,
+                "cell_count": 0,
+                "imported_at": None,
+                "import_id": "",
+            })
+            item["sheet_count"] += 1
+            item["cell_count"] += int(table.get("cell_count") or 0)
+        for key, item in grouped.items():
+            source = by_id.get(item["source_file_id"])
+            if source:
+                item.update({
+                    "file_name": source["original_name"],
+                    "storage_mode": source["storage_mode"],
+                    "content_hash": source["content_hash"],
+                    "size_bytes": source["size_bytes"],
+                    "imported_at": source["created_at"],
+                    "import_id": source["import_id"],
+                })
+        files = sorted(grouped.values(), key=lambda item: item["file_name"])
+        warnings = []
+        if self.read_only:
+            warnings.append("历史批次只读，报告不能重新生成或重试")
+        if self.kind == "demo":
+            warnings.append("示例批次生成的报告会标注为示例报告，不能作为正式材料")
+        metadata = self.cell_lake.detect_school_metadata()
+        return {
+            "dataset_id": self.dataset_id,
+            "dataset_name": self.dataset.get("name", ""),
+            "dataset_kind": self.kind,
+            "academic_year": self.dataset.get("academic_year", ""),
+            "current_revision": int(self.dataset.get("current_revision") or 1),
+            "school_name": metadata.get("school_name", ""),
+            "read_only": self.read_only,
+            "is_demo": self.kind == "demo",
+            "files": files,
+            "file_count": len(files),
+            "sheet_count": sum(item["sheet_count"] for item in files),
+            "cell_count": sum(item["cell_count"] for item in files),
+            "recent_imports": self.cell_lake.list_imports(limit=10),
+            "warnings": warnings,
+        }
 
     def refresh(self):
         row = self.owner.auth.get_dataset(self.owner.user_id, self.dataset_id)
@@ -254,10 +586,12 @@ class DatasetWorkspace:
             agent_mode=self.owner.config.get("agent_mode", ""),
             status="completed" if checkpoint.exists() else "pending",
             report_version_id=report_id,
+            dataset_kind=self.kind,
         )
         self._reports.clear()
 
     def create_report(self, school_name: str = "", status: str = "running") -> ReportWorkspace:
+        self.assert_report_writable()
         report_id = f"rv_{uuid.uuid4().hex}"
         relative = f"reports/{report_id}"
         checkpoint_dir = f"{relative}/checkpoint"
@@ -275,6 +609,7 @@ class DatasetWorkspace:
             agent_mode=self.owner.config.get("agent_mode", ""),
             status=status,
             report_version_id=report_id,
+            dataset_kind=self.kind,
         )
         self.refresh()
         return self.get_report(report_id)
@@ -315,6 +650,7 @@ class DatasetWorkspace:
         }
 
     def remove_data(self, table_name: Optional[str] = None):
+        self.assert_writable("删除入库数据")
         table = self.duckdb.registered_tables.get(table_name) if table_name is not None else None
         if table_name is not None and table is None:
             raise HTTPException(status_code=404, detail="工作表不存在或已被删除，请刷新数据目录")
@@ -330,7 +666,11 @@ class DatasetWorkspace:
             if table is None:
                 self.cell_lake.clear()
             else:
-                deleted_cells = self.cell_lake.delete_sheet(table["file_name"], table["sheet_name"])
+                deleted_cells = self.cell_lake.delete_sheet(
+                    table["file_name"],
+                    table["sheet_name"],
+                    source_file_id=table.get("source_file_id", ""),
+                )
             self.duckdb.conn.execute("COMMIT")
         except Exception:
             self.duckdb.conn.execute("ROLLBACK")
@@ -339,27 +679,42 @@ class DatasetWorkspace:
             self.duckdb.registered_tables.clear()
         else:
             self.duckdb.registered_tables.pop(table_name, None)
+            source_file_id = table.get("source_file_id", "")
+            if source_file_id:
+                still_exists = any(
+                    item.get("source_file_id") == source_file_id
+                    for item in self.cell_lake.get_tables_summary()
+                )
+                if not still_exists:
+                    self.cell_lake.delete_source_file(source_file_id)
         self.mark_data_changed()
 
-        remaining_files = {item["file_name"] for item in self.cell_lake.get_tables_summary()}
-        remaining_files.update(item["file_name"] for item in self.duckdb.get_catalog())
         cleanup_failed = False
         try:
-            for path in self.upload_dir.iterdir():
-                if table is not None and path.name != table["file_name"]:
-                    continue
-                if path.name in remaining_files or not path.is_file():
-                    continue
-                if path.is_symlink() or path.resolve().parent != self.upload_dir.resolve():
-                    continue
-                try:
-                    path.unlink()
-                except OSError:
-                    cleanup_failed = True
-                    logger.exception("Cannot remove unused upload for user %s", self.owner.user_id)
+            if table is None:
+                for path in list(self.upload_dir.iterdir()):
+                    if path.is_symlink():
+                        continue
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    elif path.is_file():
+                        path.unlink()
+            elif table.get("source_file_id"):
+                target = self.upload_dir / table["source_file_id"]
+                still_exists = any(
+                    item.get("source_file_id") == table["source_file_id"]
+                    for item in self.cell_lake.get_tables_summary()
+                )
+                if target.exists() and not still_exists:
+                    shutil.rmtree(target)
+            else:
+                remaining_files = {item["file_name"] for item in self.cell_lake.get_tables_summary()}
+                legacy_path = self.upload_dir / table["file_name"]
+                if table["file_name"] not in remaining_files and legacy_path.is_file():
+                    legacy_path.unlink()
         except OSError:
             cleanup_failed = True
-            logger.exception("Cannot clean upload directory for user %s", self.owner.user_id)
+            logger.exception("Cannot clean uploaded files for user %s", self.owner.user_id)
         return {
             "success": True,
             "dataset_id": self.dataset_id,
@@ -368,6 +723,7 @@ class DatasetWorkspace:
             "deleted_cells": deleted_cells,
             "total_cells": self.cell_lake.count(),
             "file_cleanup_warning": cleanup_failed,
+            "current_revision": int(self.dataset.get("current_revision") or 1),
             "message": f"已清空数据集“{self.dataset.get('name', '')}”的全部入库数据"
             if table is None else f"已删除工作表：{table['sheet_name']}",
         }

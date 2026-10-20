@@ -94,9 +94,10 @@ class AccountWorkspaceTests(unittest.TestCase):
         b = self.app.state.workspaces.get(user_b["id"])
         cell = next(cell for cell in a.cell_lake.get_all_cells() if cell["raw_value"] == "甲账号专属记录")
         own = self.client.get(f'/api/cell/{cell["cell_id"]}', headers=cookie_a).json()["cell"]
-        other = self.client.get(f'/api/cell/{cell["cell_id"]}', headers=cookie_b).json()["cell"]
+        other = self.client.get(f'/api/cell/{cell["cell_id"]}', headers=cookie_b)
         self.assertEqual(own["raw_value"], "甲账号专属记录")
-        self.assertEqual(other["raw_value"], "乙账号专属记录")
+        self.assertEqual(other.status_code, 404)
+        self.assertNotIn("cell", other.json())
         (a.export_dir / "private.docx").write_bytes(b"account-a-report")
         (a.chart_dir / "private.png").write_bytes(b"account-a-chart")
         self.assertEqual(self.client.get("/api/exports/private.docx", headers=cookie_a).content, b"account-a-report")

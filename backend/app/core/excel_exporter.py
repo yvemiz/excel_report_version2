@@ -21,6 +21,7 @@ class ExcelExporter:
         coverage_data: List[Dict[str, Any]],
         reconciliation_data: List[Dict[str, Any]],
         quality_summary: Optional[Dict[str, Any]] = None,
+        is_demo: bool = False,
     ) -> str:
         quality_summary = quality_summary or {}
         wb = openpyxl.Workbook()
@@ -76,14 +77,17 @@ class ExcelExporter:
         else:
             overall = "待核验"
 
-        quality_rows = [
+        quality_rows = []
+        if is_demo:
+            quality_rows.append(("报告类型", "示例报告（基于示例数据，仅供功能体验）"))
+        quality_rows.extend([
             ("评估学校", school_name),
             ("章节总数", total),
             ("核验通过小节", passed),
             ("核验异常小节", failed_count),
             ("大纲检查", outline_text),
             ("总体结论", overall),
-        ]
+        ])
         for row_idx, (label, value) in enumerate(quality_rows, 3):
             label_cell = quality.cell(row=row_idx, column=1, value=label)
             label_cell.font = Font(name="Microsoft YaHei", size=10, bold=True, color="334155")
@@ -221,7 +225,8 @@ class ExcelExporter:
                 ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
 
         clean_school = re.sub(r"[^a-zA-Z0-9_\u4e00-\u9fa5]", "", school_name) or "高校"
-        file_name = f"数据穿透审计与指标覆盖清单_{clean_school}.xlsx"
+        prefix = "示例报告_" if is_demo else ""
+        file_name = f"{prefix}数据穿透审计与指标覆盖清单_{clean_school}.xlsx"
         file_path = os.path.join(self.output_dir, file_name)
         wb.save(file_path)
         return file_path
