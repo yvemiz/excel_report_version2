@@ -36,7 +36,7 @@ function importStatusLabel(status: string) {
     <el-alert
       v-if="w.isLegacyDataset"
       title="历史报告批次只读"
-      description="已有历史报告内容受保护：不能修改入库数据、重新生成或重试小节。如需继续工作，请先在数据管理页新建评估批次。"
+      description="已有历史报告内容受保护：不能修改入库数据、重新生成或重试小节。如需继续工作，请先在数据管理页新建评估轮次。"
       type="warning"
       :closable="false"
       show-icon
@@ -66,7 +66,7 @@ function importStatusLabel(status: string) {
                 disabled /></el-form-item
           ></el-form>
           <div class="helper-text">
-            当前批次：{{ w.activeDatasetName }}
+            当前评估轮次：{{ w.activeDatasetName }}
             <template v-if="w.detectedSchool"> · 数据识别学校：{{ w.detectedSchool }}</template>
           </div></el-col
         >

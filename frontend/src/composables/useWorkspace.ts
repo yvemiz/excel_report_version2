@@ -374,7 +374,7 @@ export function useWorkspace() {
   async function createDataset() {
     const name = datasetForm.name.trim()
     if (!name) {
-      ElMessage.warning('请填写批次名称')
+      ElMessage.warning('请填写评估轮次名称')
       return
     }
     creatingDataset.value = true
@@ -389,9 +389,9 @@ export function useWorkspace() {
       datasetForm.academicYear = ''
       await fetchDatasets()
       await switchDataset(result.dataset.id)
-      ElMessage.success('批次已创建')
+      ElMessage.success('评估轮次已创建')
     } catch (error) {
-      ElMessage.error(`创建批次失败：${errorText(error)}`)
+      ElMessage.error(`创建评估轮次失败：${errorText(error)}`)
     } finally {
       creatingDataset.value = false
     }
@@ -758,7 +758,7 @@ export function useWorkspace() {
       return
     }
     if (isLegacyDataset.value) {
-      ElMessage.warning('历史批次为只读，请先在数据管理页新建评估批次')
+      ElMessage.warning('历史批次为只读，请先在数据管理页新建评估轮次')
       return
     }
     if (
@@ -1002,7 +1002,7 @@ export function useWorkspace() {
 
   async function startPipeline() {
     if (isLegacyDataset.value) {
-      ElMessage.warning('历史批次为只读，请先新建评估批次')
+      ElMessage.warning('历史批次为只读，请先新建评估轮次')
       return
     }
     if (taskState.value === 'outline_ready') return confirmOutline()

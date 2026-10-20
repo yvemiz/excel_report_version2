@@ -168,6 +168,12 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
             <div class="page-sync">
               <el-text v-if="w.lastSyncedAt" type="info" size="small"
                 >同步于 {{ w.lastSyncedAt }}</el-text
+              ><el-button
+                v-if="w.activePage === 'data'"
+                type="primary"
+                :icon="Plus"
+                @click="w.datasetDialog = true"
+                >新建评估轮次</el-button
               ><el-button :icon="Refresh" :loading="w.refreshing" @click="w.refreshAll"
                 >刷新状态</el-button
               >
@@ -185,14 +191,14 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
           <div v-if="w.datasets.length > 1" class="dataset-strip">
             <div class="dataset-strip-label">
               <el-icon><FolderOpened /></el-icon>
-              <span>当前批次</span>
+              <span>当前评估轮次</span>
             </div>
             <el-select
               :model-value="w.activeDatasetId"
               :loading="w.datasetsLoading"
               class="dataset-strip-select"
               popper-class="dataset-select-popper"
-              placeholder="选择评估批次"
+              placeholder="选择评估轮次"
               @change="w.switchDataset"
             >
               <el-option
@@ -208,7 +214,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
               </el-option>
             </el-select>
             <el-tag v-if="w.activeDataset?.kind === 'demo'" type="warning" effect="plain">示例数据</el-tag>
-            <el-button text :icon="Plus" @click="w.datasetDialog = true">新建评估批次</el-button>
+            <el-button text :icon="Plus" @click="w.datasetDialog = true">新建评估轮次</el-button>
           </div>
           <el-alert
             v-if="schoolMismatch"
@@ -251,21 +257,21 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
   >
   <el-dialog
     v-model="w.datasetDialog"
-    title="新建评估批次"
+    title="新建评估轮次"
     width="min(520px, calc(100vw - 32px))"
     :close-on-click-modal="!w.creatingDataset"
     :close-on-press-escape="!w.creatingDataset"
     :show-close="!w.creatingDataset"
   >
     <el-form label-position="top" @submit.prevent="w.createDataset">
-      <el-form-item label="批次名称">
+      <el-form-item label="轮次名称">
         <el-input v-model="w.datasetForm.name" placeholder="例如 2026 年本科教学评估" clearable />
       </el-form-item>
       <el-form-item label="年度 / 周期（可选）">
         <el-input v-model="w.datasetForm.academicYear" placeholder="例如 2026" clearable />
       </el-form-item>
     </el-form>
-    <div class="helper-text">仅用于海南师范大学不同年度或评估批次，不会切换学校。</div>
+    <div class="helper-text">每个评估轮次可对应一个年度或评估批次，不会切换学校。</div>
     <template #footer>
       <el-button :disabled="w.creatingDataset" @click="w.datasetDialog = false">取消</el-button>
       <el-button type="primary" :loading="w.creatingDataset" @click="w.createDataset">创建并切换</el-button>
@@ -281,7 +287,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', resize))
   >
     <el-alert
       title="使用运行后端服务的计算机上的路径"
-      :description="`将导入到当前批次：${w.activeDatasetName}。同名文件会被拒绝，请先删除旧文件或新建批次。`"
+      :description="`将导入到当前评估轮次：${w.activeDatasetName}。同名文件会被拒绝，请先删除旧文件或新建评估轮次。`"
       type="info"
       :closable="false"
       show-icon

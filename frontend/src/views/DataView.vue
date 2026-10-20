@@ -48,7 +48,7 @@ async function submitFiles() {
     <el-alert
       v-if="w.isLegacyDataset"
       title="历史报告批次只读"
-      description="为保护已有历史报告，不能修改或清空该批次数据。请新建评估批次后再继续导入。"
+      description="为保护已有历史报告，不能修改或清空该轮次数据。请新建评估轮次后再继续导入。"
       type="warning"
       show-icon
       :closable="false"
@@ -86,7 +86,7 @@ async function submitFiles() {
             <div class="el-upload__text">将 Excel 文件拖到这里，或<em>点击选择文件</em></div>
             <template #tip
               ><div class="el-upload__tip">
-                选择后点击“上传并解析”，文件会进入当前批次；同一批次内同名文件会被拒绝，请新建批次或先删除旧文件。
+                选择后点击“上传并解析”，文件会进入当前评估轮次；同一轮次内同名文件会被拒绝，请新建评估轮次或先删除旧文件。
               </div></template
             >
           </el-upload>
@@ -126,8 +126,8 @@ async function submitFiles() {
               >载入示例数据</el-button
             >
             <el-divider />
-            <p>需要保留同一学校不同年度或评估批次时，可新建批次；不会切换学校。</p>
-            <el-button :icon="Plus" @click="w.datasetDialog = true">新建评估批次</el-button>
+            <p>需要保留同一学校不同年度或评估批次时，可新建评估轮次；不会切换学校。</p>
+            <el-button :icon="Plus" @click="w.datasetDialog = true">新建评估轮次</el-button>
           </div></el-col
         >
       </el-row>
@@ -136,13 +136,16 @@ async function submitFiles() {
       <template #header
         ><div class="card-heading">
           <div>
-            <span>当前批次数据目录</span>
+            <span>当前评估轮次数据目录</span>
             <div class="card-subtitle">
               {{ w.activeDatasetName }} · {{ w.fileCount }} 个文件 · {{ w.sheets.length }} 个工作表 ·
               {{ w.totalCells.toLocaleString() }} 个数据单元格 · 修订号 v{{ w.manifest?.current_revision ?? '—' }}
             </div>
           </div>
           <el-space wrap>
+            <el-button type="primary" :icon="Plus" @click="w.datasetDialog = true"
+              >新建评估轮次</el-button
+            >
             <el-button :icon="Refresh" :loading="w.refreshing" @click="w.refreshAll"
               >刷新</el-button
             >
