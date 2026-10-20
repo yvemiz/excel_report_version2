@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # 设置中文字体与学术优雅样式
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'SimSun', 'DejaVu Sans']
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Zen Hei', 'WenQuanYi Micro Hei', 'SimSun', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 高雅学术色彩盘 (Navy, Slate Blue, Teal, Amber, Crimson, Sage)

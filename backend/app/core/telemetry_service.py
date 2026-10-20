@@ -33,9 +33,11 @@ class TelemetryService:
         completion_tokens: int,
         jev_score: float,
         citations_count: int,
-        audit_passed: bool
+        audit_passed: bool,
+        trace_file: Optional[str] = None,
     ) -> Dict[str, Any]:
-        os.makedirs(os.path.dirname(cls.TRACE_FILE), exist_ok=True)
+        destination = trace_file or cls.TRACE_FILE
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
 
         # DeepSeek 标准计费估算（人民币）：输入 1元/百万Token，输出 4元/百万Token
         est_cost_cny = round((prompt_tokens * 1.0 + completion_tokens * 4.0) / 1_000_000, 5)
@@ -56,7 +58,7 @@ class TelemetryService:
         }
 
         try:
-            with open(cls.TRACE_FILE, "a", encoding="utf-8") as f:
+            with open(destination, "a", encoding="utf-8") as f:
                 f.write(json.dumps(trace_entry, ensure_ascii=False) + "\n")
         except Exception as e:
             print(f"[Telemetry Warning]: 无法写入本地可观测跟踪文件: {e}")
@@ -64,9 +66,10 @@ class TelemetryService:
         return trace_entry
 
     @classmethod
-    def get_summary(cls) -> Dict[str, Any]:
+    def get_summary(cls, trace_file: Optional[str] = None) -> Dict[str, Any]:
         """获取近期生成的聚合可观测性指标"""
-        if not os.path.exists(cls.TRACE_FILE):
+        destination = trace_file or cls.TRACE_FILE
+        if not os.path.exists(destination):
             return {
                 "total_sections_traced": 0,
                 "total_tokens_consumed": 0,
@@ -77,7 +80,7 @@ class TelemetryService:
 
         traces = []
         try:
-            with open(cls.TRACE_FILE, "r", encoding="utf-8") as f:
+            with open(destination, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line:
@@ -106,15 +109,15 @@ class DeepSeekBalanceMonitor:
     """
 
     @classmethod
-    async def fetch_balance(cls, api_key: Optional[str] = None) -> Dict[str, Any]:
-        key = api_key or getattr(settings, "DEEPSEEK_API_KEY", "")
+    async def fetch_balance(cls, api_key: Optional[str] = None, trace_file: Optional[str] = None) -> Dict[str, Any]:
+        key = getattr(settings, "DEEPSEEK_API_KEY", "") if api_key is None else api_key
         if not key or key.startswith("your_") or len(key) < 10:
             return {
                 "is_configured": False,
                 "balance_cny": "--",
                 "currency": "CNY",
                 "status": "未配置真实 DeepSeek API Key（当前使用高保真确定性引擎）",
-                "token_burn_summary": TelemetryService.get_summary()
+                "token_burn_summary": TelemetryService.get_summary(trace_file)
             }
 
         url = "https://api.deepseek.com/user/balance"
@@ -138,19 +141,19 @@ class DeepSeekBalanceMonitor:
                         "balance_cny": cny_val,
                         "currency": "CNY",
                         "status": "余额正常" if data.get("is_available") else "余额不足或受限",
-                        "token_burn_summary": TelemetryService.get_summary()
+                        "token_burn_summary": TelemetryService.get_summary(trace_file)
                     }
                 else:
                     return {
                         "is_configured": True,
                         "balance_cny": "--",
                         "status": f"查询接口响应 HTTP {resp.status_code}",
-                        "token_burn_summary": TelemetryService.get_summary()
+                        "token_burn_summary": TelemetryService.get_summary(trace_file)
                     }
         except Exception as e:
             return {
                 "is_configured": True,
                 "balance_cny": "--",
                 "status": f"查询超时或离线 ({str(e)})",
-                "token_burn_summary": TelemetryService.get_summary()
+                "token_burn_summary": TelemetryService.get_summary(trace_file)
             }

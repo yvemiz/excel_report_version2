@@ -1,6 +1,8 @@
 import duckdb
+import hashlib
 import os
 import re
+import shutil
 from typing import List, Dict, Any
 import pandas as pd
 
@@ -51,12 +53,30 @@ class DuckDBEngine:
         clean = re.sub(r'_+', '_', clean).strip('_')
         return f"tbl_{clean}"
 
-    def register_sheet(self, sheet_name: str, file_name: str, rows: List[Dict[str, Any]], headers: List[str]) -> str:
-        """将单个 Sheet 的数据注册为 DuckDB 表"""
+    @staticmethod
+    def table_name_for(source_file_id: str, sheet_name: str) -> str:
+        if not source_file_id:
+            raise ValueError("内部物理表名必须绑定 source_file_id")
+        digest = hashlib.sha256(f"{source_file_id}|{sheet_name}".encode("utf-8")).hexdigest()[:12]
+        return f"tbl_{source_file_id}_{digest}"
+
+    def register_sheet(
+        self,
+        sheet_name: str,
+        file_name: str,
+        rows: List[Dict[str, Any]],
+        headers: List[str],
+        source_file_id: str = "",
+        import_id: str = "",
+    ) -> str:
+        """将单个 Sheet 的数据注册为 DuckDB 表。新数据使用内部身份命名。"""
         if not rows:
             return ""
 
-        table_name = self._sanitize_table_name(f"{os.path.splitext(file_name)[0]}_{sheet_name}")
+        if source_file_id:
+            table_name = self.table_name_for(source_file_id, sheet_name)
+        else:
+            table_name = self._sanitize_table_name(f"{os.path.splitext(file_name)[0]}_{sheet_name}")
         df = pd.DataFrame(rows)
         
         # 将 DataFrame 注册为 DuckDB 表
@@ -69,9 +89,31 @@ class DuckDBEngine:
             "sheet_name": sheet_name,
             "file_name": file_name,
             "row_count": len(rows),
-            "columns": headers
+            "columns": headers,
+            "source_file_id": source_file_id,
+            "import_id": import_id,
         }
         return table_name
+
+    def checkpoint(self):
+        self.conn.execute("CHECKPOINT")
+
+    def snapshot_to(self, destination: str):
+        """关闭连接、生成可复制快照，再自动恢复当前连接。"""
+        if self.db_path == ":memory:":
+            raise ValueError("内存数据库不能用于原子导入快照")
+        target = os.path.abspath(destination)
+        if os.path.abspath(self.db_path) == target:
+            raise ValueError("暂存数据库不能覆盖当前数据库")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if os.path.exists(target):
+            os.remove(target)
+        self.conn.execute("CHECKPOINT")
+        self.conn.close()
+        try:
+            shutil.copy2(self.db_path, target)
+        finally:
+            self.conn = duckdb.connect(self.db_path)
 
     def query(self, sql: str) -> List[Dict[str, Any]]:
         """执行通用 SQL 查询并返回字典列表（采用独立 cursor 保证并发安全）"""

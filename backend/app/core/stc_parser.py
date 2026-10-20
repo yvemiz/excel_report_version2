@@ -1,8 +1,19 @@
 import os
 import hashlib
+from pathlib import Path
 from typing import List, Dict, Any, Tuple
 import xlrd
 import openpyxl
+
+
+class STCParseError(ValueError):
+    """目录导入时至少一个文件解析失败。"""
+
+    def __init__(self, failures):
+        self.failures = failures
+        detail = "；".join(f"{Path(path).name}: {message}" for path, message in failures[:5])
+        super().__init__(f"{len(failures)} 个文件解析失败：{detail}")
+
 
 class STCParser:
     """
@@ -171,6 +182,7 @@ class STCParser:
                 "cells": cells_data
             })
 
+        wb.close()
         return results
 
     @classmethod
@@ -281,10 +293,18 @@ class STCParser:
         return hashlib.sha256(sig.encode("utf-8")).hexdigest()[:16]
 
     @classmethod
-    def parse_directory(cls, dir_path: str, recursive: bool = True, max_workers: int = 8) -> List[Dict[str, Any]]:
+    def parse_directory(
+        cls,
+        dir_path: str,
+        recursive: bool = True,
+        max_workers: int = 8,
+        file_validator=None,
+        strict: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         批量并发扫描并解析指定本地目录中的所有 Excel 报表 (.xls / .xlsx)
         支持多达 500+ 个文件的并行解析，耗时大幅压缩
+        优先采用 ProcessPoolExecutor 突破 GIL，充分发挥多核 CPU 算力
         """
         if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
             raise FileNotFoundError(f"指定的目录不存在: {dir_path}")
@@ -302,19 +322,46 @@ class STCParser:
 
         if not matched_files:
             return []
+        if file_validator:
+            for file_path in matched_files:
+                file_validator(file_path)
 
         all_parsed_tables = []
-        from concurrent.futures import ThreadPoolExecutor
+        failures = []
         workers = min(max_workers, len(matched_files), os.cpu_count() or 4)
-        
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_file = {executor.submit(cls.parse_file, fp): fp for fp in matched_files}
-            for future in future_to_file:
-                fp = future_to_file[future]
-                try:
-                    tables = future.result()
-                    all_parsed_tables.extend(tables)
-                except Exception as e:
-                    print(f"[!] 批量解析文件失败: {fp}, 错误: {e}")
 
+        from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+        try:
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_parse_single_file_task, fp): fp for fp in matched_files}
+                for fut in futures:
+                    fp = futures[fut]
+                    try:
+                        tables = fut.result()
+                        all_parsed_tables.extend(tables)
+                    except Exception as e:
+                        failures.append((fp, str(e)))
+                        print(f"[!] 多进程解析文件失败: {fp}, 错误: {e}")
+        except Exception as proc_err:
+            print(f"[!] 多进程执行异常 ({proc_err})，自动降级至多线程解析...")
+            all_parsed_tables = []
+            failures = []
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(cls.parse_file, fp): fp for fp in matched_files}
+                for fut in futures:
+                    fp = futures[fut]
+                    try:
+                        tables = fut.result()
+                        all_parsed_tables.extend(tables)
+                    except Exception as e:
+                        failures.append((fp, str(e)))
+                        print(f"[!] 多线程解析文件失败: {fp}, 错误: {e}")
+
+        if strict and failures:
+            raise STCParseError(failures)
         return all_parsed_tables
+
+
+def _parse_single_file_task(file_path: str) -> List[Dict[str, Any]]:
+    """顶级函数供 ProcessPoolExecutor 跨进程调用"""
+    return STCParser.parse_file(file_path)

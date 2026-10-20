@@ -6,6 +6,8 @@ import httpx
 from app.config import settings
 from app.core.chart_service import ChartService
 from app.pipeline.pi_bridge import PiAgentBridge
+from app.pipeline.output_guard import ModelOutputLeakError, guard_content_stream, sanitize_model_output
+from app.pipeline.provider_guards import build_output_filters
 
 class PiAgentRunner:
     """
@@ -30,6 +32,13 @@ class PiAgentRunner:
     def set_agent_mode(self, mode: str):
         self.agent_mode = mode if mode in ["pi_agent", "python_native"] else "pi_agent"
 
+    def _output_filters(self):
+        return build_output_filters(model=self.model, base_url=self.base_url)
+
+    def sanitize_output(self, text: str):
+        """供落库/导出边界调用的通用输出兜底。"""
+        return sanitize_model_output(text, self._output_filters())
+
     async def stream_write_section(
         self,
         section_meta: Dict[str, Any],
@@ -44,6 +53,14 @@ class PiAgentRunner:
         chapter_title = section_meta.get("chapter_title", "")
         section_title = section_meta.get("section_title", "")
         objective = section_meta.get("objective", "")
+
+        from app.pipeline.domain_subagents import SubagentRouter
+        from app.pipeline.prompt_enhancer import JevPromptEnhancer, StructuredOutputEnforcer
+
+        # 智能匹配专属 Domain Subagent (Inspired by pi-subagents)
+        subagent = SubagentRouter.route(section_meta)
+        section_meta["subagent_role"] = subagent.role_name
+        section_meta["subagent_title"] = subagent.title
 
         # 1. 尝试触发 chart-tool (如果有图表规划，且未曾生成过)
         chart_markdown = ""
@@ -71,37 +88,56 @@ class PiAgentRunner:
                     yield {"type": "chunk", "text": chart_markdown}
 
                 pi_full_content = ""
-                async for item in self.bridge.stream_write_section(
-                    api_key=self.api_key,
-                    base_url=self.base_url,
-                    model=self.model,
-                    section_meta=section_meta,
-                    retrieved_data=retrieved_data,
-                    cell_mappings=cell_mappings,
-                    revision_feedback=revision_feedback
+                async for item in guard_content_stream(
+                    self.bridge.stream_write_section(
+                        api_key=self.api_key,
+                        base_url=self.base_url,
+                        model=self.model,
+                        section_meta=section_meta,
+                        retrieved_data=retrieved_data,
+                        cell_mappings=cell_mappings,
+                        revision_feedback=revision_feedback
+                    ),
+                    self._output_filters(),
                 ):
                     if item["type"] == "chunk":
                         pi_full_content += item["text"]
                         yield item
+                    elif item["type"] == "model_output_leak":
+                        yield item
+                    elif item["type"] in ("tool_execution_start", "tool_execution_end", "chart_generated", "agent_info"):
+                        yield item
                     elif item["type"] == "done":
                         pi_full_content = item["full_content"]
                         full_res = f"{chart_markdown}{pi_full_content}" if chart_markdown else pi_full_content
-                        yield {"type": "done", "full_content": full_res}
+                        repaired = StructuredOutputEnforcer.validate_and_repair(
+                            full_res, section_title, [c.get("cell_id", "") for c in cell_mappings]
+                        )
+                        yield {"type": "done", "full_content": repaired["repaired_text"]}
                         return
 
                 if pi_full_content:
                     full_res = f"{chart_markdown}{pi_full_content}" if chart_markdown else pi_full_content
-                    yield {"type": "done", "full_content": full_res}
+                    repaired = StructuredOutputEnforcer.validate_and_repair(
+                        full_res, section_title, [c.get("cell_id", "") for c in cell_mappings]
+                    )
+                    yield {"type": "done", "full_content": repaired["repaired_text"]}
                     return
 
+            except ModelOutputLeakError as e:
+                print(f"[Pi-Agent Output Guard]: {e}, 丢弃本轮并切换至 Python 原生引擎")
             except Exception as e:
                 print(f"[Pi-Agent Bridge Warning]: {e}, 自动平滑切换至 Python 原生引擎")
 
-        # 2. 判断是否可以使用 DeepSeek API
+        # 3. 判断是否可以使用 DeepSeek API
         has_valid_key = bool(self.api_key and not self.api_key.startswith("your_"))
         
         if has_valid_key:
-            prompt = self._build_prompt(chapter_title, section_title, objective, retrieved_data, cell_mappings, revision_feedback)
+            raw_prompt = self._build_prompt(chapter_title, section_title, objective, retrieved_data, cell_mappings, revision_feedback)
+            # Jev Prompt 决策模型增强 (Inspired by @hikae/pi-prompt-enhancer)
+            enhanced = JevPromptEnhancer.enhance(raw_prompt, subagent.system_instruction)
+            prompt = enhanced["enhanced_prompt"]
+
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
@@ -121,40 +157,73 @@ class PiAgentRunner:
 
             accumulated_text = ""
             try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    async with client.stream("POST", f"{self.base_url.rstrip('/')}/chat/completions", json=payload, headers=headers) as resp:
-                        if resp.status_code == 200:
-                            if chart_markdown:
-                                accumulated_text += chart_markdown
-                                yield {"type": "chunk", "text": chart_markdown}
-                            async for line in resp.aiter_lines():
-                                if line.startswith("data: ") and line != "data: [DONE]":
-                                    data_str = line[6:]
-                                    try:
-                                        chunk = json.loads(data_str)
-                                        delta = chunk["choices"][0]["delta"].get("content", "")
-                                        if delta:
-                                            # 如果模型又重复输出了同一张图片，进行去重
-                                            if chart_markdown.strip() and chart_markdown.strip() in delta:
-                                                continue
-                                            accumulated_text += delta
-                                            yield {"type": "chunk", "text": delta}
-                                    except Exception:
-                                        continue
-                            repaired = StructuredOutputEnforcer.validate_and_repair(
-                                accumulated_text, section_title, [c.get("cell_id", "") for c in cell_mappings]
-                            )
-                            yield {"type": "done", "full_content": repaired["repaired_text"]}
-                            return
-                        else:
-                            resp_text = await resp.aread()
-                            print(f"DeepSeek returned status {resp.status_code}: {resp_text.decode('utf-8', errors='ignore')}")
+                async for item in guard_content_stream(
+                    self._stream_native_events(headers, payload, chart_markdown),
+                    self._output_filters(),
+                ):
+                    if item["type"] == "chunk":
+                        accumulated_text += item["text"]
+                        yield item
+                    elif item["type"] == "model_output_leak":
+                        yield item
+                    elif item["type"] == "done":
+                        repaired = StructuredOutputEnforcer.validate_and_repair(
+                            item["full_content"], section_title, [c.get("cell_id", "") for c in cell_mappings]
+                        )
+                        yield {"type": "done", "full_content": repaired["repaired_text"]}
+                        return
+            except ModelOutputLeakError as e:
+                print(f"[Output Guard] Python 原生输出泄漏，已丢弃本轮并转入确定性合成: {e}")
             except Exception as e:
                 print(f"DeepSeek stream error, falling back to deterministic synthesis: {e}")
 
         # 3. 兜底高保真实质合成器（确保无网络/无Key时 100% 吻合穿透溯源生成）
         async for item in self._deterministic_synthesize(section_meta, retrieved_data, cell_mappings, chart_markdown):
             yield item
+
+    async def _stream_native_events(
+        self,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        chart_markdown: str = "",
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Python 原生 HTTP 流 -> 统一的 chunk/done 事件流。"""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            async with client.stream(
+                "POST",
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as resp:
+                if resp.status_code != 200:
+                    resp_text = await resp.aread()
+                    print(
+                        f"DeepSeek returned status {resp.status_code}: "
+                        f"{resp_text.decode('utf-8', errors='ignore')}"
+                    )
+                    return
+
+                full_text = ""
+                if chart_markdown:
+                    full_text += chart_markdown
+                    yield {"type": "chunk", "text": chart_markdown}
+
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(line[6:])
+                        delta = chunk["choices"][0]["delta"].get("content", "")
+                    except Exception:
+                        continue
+                    if not delta:
+                        continue
+                    if chart_markdown.strip() and chart_markdown.strip() in delta:
+                        continue
+                    full_text += delta
+                    yield {"type": "chunk", "text": delta}
+
+                yield {"type": "done", "full_content": full_text}
 
     def _build_prompt(
         self,
