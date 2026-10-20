@@ -12,7 +12,7 @@ import {
   Plus,
 } from '@element-plus/icons-vue'
 import type { Workspace } from '../composables/useWorkspace'
-import type { SheetInfo } from '../types'
+import type { DatasetInfo, SheetInfo } from '../types'
 const { workspace: w } = defineProps<{ workspace: Workspace }>()
 const files = ref<UploadUserFile[]>([])
 const query = ref('')
@@ -41,6 +41,25 @@ async function submitFiles() {
   const raw = files.value.flatMap((file) => (file.raw ? [file.raw] : []))
   if (await w.uploadFiles(raw)) files.value = []
 }
+
+function datasetKindLabel(dataset: DatasetInfo) {
+  if (dataset.kind === 'demo') return '示例数据'
+  if (dataset.kind === 'legacy') return '历史数据'
+  return dataset.academic_year || '正式数据'
+}
+
+function reportStatusLabel(status: string) {
+  return {
+    '': '暂无报告',
+    pending: '待生成',
+    outline_running: '大纲规划中',
+    outline_ready: '大纲待确认',
+    running: '生成中',
+    completed: '已完成',
+    interrupted: '已中断',
+    failed: '失败',
+  }[status] || status
+}
 </script>
 
 <template>
@@ -60,6 +79,62 @@ async function submitFiles() {
       show-icon
       :closable="false"
     />
+    <el-card shadow="never">
+      <template #header
+        ><div class="card-heading">
+          <div>
+            <span>评估轮次</span>
+            <div class="card-subtitle">
+              这里可以查看和切换全部历史轮次、示例数据与只读历史数据
+            </div>
+          </div>
+          <el-tag type="info">共 {{ w.datasets.length }} 个轮次</el-tag>
+        </div></template
+      >
+      <el-table :data="w.datasets" row-key="id" size="small">
+        <el-table-column label="轮次名称" min-width="220">
+          <template #default="{ row }">
+            <div class="table-title">{{ row.name }}</div>
+            <div class="table-caption">{{ datasetKindLabel(row as DatasetInfo) }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="数据修订" width="100" align="right">
+          <template #default="{ row }">v{{ row.current_revision }}</template>
+        </el-table-column>
+        <el-table-column label="数据量" width="150" align="right">
+          <template #default="{ row }">
+            {{ row.table_count }} 个工作表 · {{ row.cell_count.toLocaleString() }} 个单元格
+          </template>
+        </el-table-column>
+        <el-table-column label="报告" width="150">
+          <template #default="{ row }">
+            {{ row.report_count }} 个版本 · {{ reportStatusLabel(row.latest_report_status) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag
+              :type="row.id === w.activeDatasetId ? 'success' : row.kind === 'demo' ? 'warning' : 'info'"
+              size="small"
+            >
+              {{ row.id === w.activeDatasetId ? '当前轮次' : row.kind === 'demo' ? '示例' : '历史' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="130" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              link
+              type="primary"
+              :disabled="row.id === w.activeDatasetId || w.isBusy"
+              @click="w.switchDataset(row.id)"
+            >
+              切换到此轮次
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
     <el-card shadow="never">
       <template #header
         ><div class="card-heading">
